@@ -32,6 +32,25 @@
   <li><strong>存原件</strong>：对象键形如 <code>resumes/2026/08/14/1a2b3c4d_ZhangSanJianLi.pdf</code>，按日期分目录，前缀 8 位随机串防重名，中文文件名转成大驼峰拼音，其他特殊字符替换成下划线，规避 S3 对键名的兼容问题。</li>
   <li><strong>落库并投递</strong>：状态写 PENDING 后提交事务，再把“简历 ID + 正文”写入分析 Stream，接口立即返回。前端拿到 ID 后开始轮询。</li>
 </ol>
+<div class="callout example">
+  <span class="label">走一遍：一份简历经过清洗和存储后变成什么</span>
+  <pre>原始文件名：张三-Java后端简历(2026).pdf
+对象键：    resumes/2026/08/14/7c3e9a01_ZhangSan-JavaHouDuanJianLi_2026_.pdf
+            └ 前缀/日期/UUID 前 8 位_文件名：汉字逐个转成首字母大写的拼音（pinyin4j，不带声调），
+              字母数字和 . _ - 原样保留，括号等其他字符换成下划线</pre>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Tika 抽出的正文（节选）</th><th>TextCleaningService 之后</th><th>规则</th></tr></thead>
+      <tbody>
+        <tr><td><code>image1.png</code>（单独一行）</td><td>整行删除</td><td>整行图片文件名</td></tr>
+        <tr><td><code>------------------------</code></td><td>整行删除</td><td>3 个以上 <code>- _ * =</code> 组成的分隔线</td></tr>
+        <tr><td>项目经历 + 控制字符 <code>\u0007</code></td><td>项目经历</td><td>控制字符</td></tr>
+        <tr><td>架构图见 <code>https://x.com/a.png</code></td><td>架构图见</td><td>图片链接，随后去掉行尾空白</td></tr>
+        <tr><td>连续 4 个空行</td><td>1 个空行</td><td>3 个以上换行压成 2 个</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 <h3 id="resume-analysis">分析与报告</h3>
 <p>分析 Prompt 的人设是“10 年以上经验的技术架构师兼人才顾问”，要求做三件事：纠正不规范的技术名词（如 mysql 写成 MySQL）、挑 2–3 条项目经历按 STAR 法则给出“原句 vs 优化句”、对平庸的技术方案给出替代建议。评分是固定权重的五个维度：</p>
 <div class="table-wrap">
@@ -121,7 +140,26 @@
 </ul>
 <h3 id="ti-notes">实现细节与问题</h3>
 <ul>
-  <li><strong>校验注解没生效</strong>：创建请求上写了题量 3–20、方向不能为空的校验注解，但接口参数前漏了 <code>@Valid</code>，这些约束一条都不执行，出题服务里也没有截断题量。项目里其他写了校验注解的请求体都配了 <code>@Valid</code>，只有这一处漏掉。</li>
+  <li><strong>校验注解没生效</strong>：创建请求上写了题量 3–20、方向不能为空的校验注解，但接口参数前漏了 <code>@Valid</code>，这些约束一条都不执行，出题服务里也没有截断题量。项目里其他写了校验注解的请求体都配了 <code>@Valid</code>，只有这一处漏掉。
+    <div class="prompt code">
+      <div class="prompt-head"><span>源码对照 · CreateInterviewRequest 与 InterviewController.createSession</span></div>
+      <pre>public record CreateInterviewRequest(
+    String resumeText,
+    @Min(value = 3, message = "题目数量最少3题")
+    @Max(value = 20, message = "题目数量最多20题")
+    int questionCount,
+    @NotBlank(message = "面试主题不能为空")
+    String skillId,
+    ...
+
+@PostMapping("/api/interview/sessions")
+public Result&lt;InterviewSessionDTO&gt; createSession(@RequestBody CreateInterviewRequest request) {
+    //                                           ↑ 这里少了 @Valid，上面三条约束都不会执行
+    InterviewSessionDTO session = sessionService.createSession(request);
+    return Result.success(session);
+}</pre>
+    </div>
+    后果可以具体到请求：<code>{"skillId":"java-backend","questionCount":200}</code> 会让方向题分配算法按 200 题分配、Prompt 里写“请生成共 200 个主问题”，而 <code>skillId</code> 为空串时会一路走到 <code>getSkill("")</code> 才报错。</li>
   <li><strong>遗留的同步报告接口</strong>：<code>GET /api/interview/sessions/{id}/report</code> 仍然会在请求线程里把整场面试同步评估一遍并覆盖已有报告，没有限流。前端早已改成读异步结果，这个接口没有调用方，却是一个能被反复触发的昂贵操作，应该删除或改成只读。</li>
   <li><strong>简历文本来自前端</strong>：出题用的简历正文是前端随请求传上来的，而评估时用的是数据库里 <code>resumeId</code> 对应的正文。两个来源在正常使用时一致，但后端其实没必要信任客户端传来的正文。</li>
   <li><strong>吞掉的失败</strong>：没有幂等键的创建路径里，会话落库失败只打一条告警，这场面试就只存在 Redis 里，24 小时后消失；暂存答案失败也只打告警，前端以为保存成功。</li>
@@ -176,6 +214,32 @@
   </div>
   <figcaption>几十上百次 Embedding 调用都在事务外完成，只有最后两条 SQL 在一个事务里。失败时旧向量毫发无损，成功时检索在一次提交的瞬间整体切换，不会出现“新旧混杂”或“空窗期”。两个重新向量化任务并发时，后提交的那个整体胜出，同样不会混杂。</figcaption>
 </figure>
+<p>“影子写入”具体是怎么做到“检索看不到”的：检索时的过滤条件是 <code>kb_id in ['7']</code>，而新写入的每个分块，<code>kb_id</code> 字段先填的是一个不可能被查到的临时值。下面是一个分块的 <code>metadata</code> 在各阶段的真实形态（前三个字段是 Spring AI 的 <code>TokenTextSplitter</code> 自动加的）：</p>
+<div class="callout example">
+  <span class="label">走一遍：重新向量化知识库 7（jobId = 4c1e8f2a-…）</span>
+  <pre>① 分块：TokenTextSplitter 默认配置
+   以仓库自己的 README.md 为例：19224 个字符 → 12 个分块（每块 863–2232 字符）→ 2 批 Embedding 调用
+   注意第 1 块结尾是依赖表的某一行，第 2 块开头是表格的下一行：分块不重叠，也不认识 Markdown 结构
+
+② 写入临时数据（vectorStore.add，每批 10 块，事务外）
+   metadata = {"chunk_index":0, "total_chunks":12, "parent_document_id":"cbbc5273-…",
+               "kb_id":"pending:7:4c1e8f2a-…",        ← 检索过滤 kb_id in ['7'] 匹配不到它
+               "kb_target_id":"7", "kb_vector_job_id":"4c1e8f2a-…"}
+
+③ 全部成功后，一个事务里执行两条 SQL（activateVectorJob）
+   DELETE FROM vector_store
+    WHERE metadata-&gt;&gt;'kb_id' = '7'
+       OR (metadata-&gt;&gt;'kb_id_long' IS NOT NULL AND (metadata-&gt;&gt;'kb_id_long')::bigint = 7);
+   UPDATE vector_store
+      SET metadata = (jsonb_set(metadata::jsonb, '{kb_id}', to_jsonb('7'::text), true)
+                      - 'kb_vector_job_id' - 'kb_target_id')::json
+    WHERE metadata-&gt;&gt;'kb_vector_job_id' = '4c1e8f2a-…';
+   提交后 metadata = {"chunk_index":0, "total_chunks":12, "parent_document_id":"cbbc5273-…", "kb_id":"7"}
+
+③' 任何一步失败（比如第 2 批 Embedding 超时）
+   DELETE FROM vector_store WHERE metadata-&gt;&gt;'kb_vector_job_id' = '4c1e8f2a-…';
+   旧的 kb_id='7' 的向量一行没动，检索照常工作</pre>
+</div>
 <p>这套机制来自提交 <span class="sha">72aff88</span>（“将知识库向量化改为临时任务提升，避免失败时污染正式检索数据”）。在它之前，重新向量化是“先删旧的再写新的”，写到一半失败，知识库就只剩一部分向量。实现上有两处小心思：元数据列是 <code>json</code> 类型，提升时先转 <code>jsonb</code> 用 <code>jsonb_set</code> 改 <code>kb_id</code>、删掉两个临时键，再转回 <code>json</code>；删除语句额外兼容了旧版本数据里的 <code>kb_id_long</code> 字段，并刻意避开 PostgreSQL 的 <code>?</code> 操作符，因为它会和 JDBC 占位符冲突。</p>
 <h3 id="rag-pipeline">问答链路</h3>
 <figure class="diagram">
@@ -227,14 +291,53 @@
 </figure>
 <ul>
   <li><strong>为什么要改写</strong>：多轮对话里用户常问“那它的原理呢”，直接拿这句去检索什么也找不到。改写 Prompt 拿到最近的对话历史（助手回复截断到 200 字），输出一句适合检索的完整查询。改写结果和原问题都作为候选，按顺序检索，第一个有结果的胜出，防止改写跑偏。</li>
-  <li><strong>为什么按长度调参</strong>：两三个字的查询（例如“索引”）向量很“虚”，和相关段落的相似度普遍偏低，所以阈值放低、多取几条；长问题语义明确，少取几条、阈值抬高，减少噪声。中间档的分界值 12 写死在代码里，其他值都可配置。</li>
+  <li><strong>为什么按长度调参</strong>：两三个字的查询（例如“索引”）向量很“虚”，和相关段落的相似度普遍偏低，所以阈值放低、多取几条；长问题语义明确，少取几条、阈值抬高，减少噪声。中间档的分界值 12 写死在代码里，其他值都可配置。长度是去掉所有空白后的字符数，按 <code>application.yml</code> 实际生效的值：
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>问题</th><th class="num">去空白长度</th><th>档位</th><th class="num">TopK</th><th class="num">相似度阈值</th></tr></thead>
+        <tbody>
+          <tr><td>索引</td><td class="num">2</td><td>短（≤ 4）</td><td class="num">20</td><td class="num">0.18</td></tr>
+          <tr><td>Redis 持久化机制</td><td class="num">10</td><td>中（≤ 12）</td><td class="num">12</td><td class="num">0.28</td></tr>
+          <tr><td>RDB 和 AOF 在宕机恢复时各有什么取舍？</td><td class="num">20</td><td>长</td><td class="num">8</td><td class="num">0.28</td></tr>
+        </tbody>
+      </table>
+    </div>
+    有一个实现细节：档位是按<strong>原始问题</strong>算的，不是按改写后的查询。多轮对话里用户追问“那它呢”（3 个字），改写后已经是一句完整的查询，却仍然按“短查询”取 20 条、阈值 0.18，召回的噪声反而最多。</li>
   <li><strong>多轮上下文</strong>：历史消息作为真正的对话消息传给模型，而不是拼进文本。取最近 10 条已完成的消息，实现上多查一条再丢掉最新的那条，因为当前这轮的用户消息已经先落库了（<span class="sha">1bf8f1b</span>）。</li>
   <li><strong>流式与落库</strong>：发消息时先在一个事务里保存用户消息和一条“未完成”的助手占位消息，再开始流式输出；完成时写入完整内容，出错时保存已收到的部分或错误提示。会话支持改标题、置顶、更换关联的知识库，标题默认取知识库名。</li>
   <li><strong>Prompt 里的流式格式规范</strong>：系统提示词花了很大篇幅规定 Markdown 格式（<code>##</code> 后必须有空格、列表项独立成行等），因为流式渲染时格式不规范会导致前端边收边渲染出错。</li>
 </ul>
+<div class="callout example">
+  <span class="label">走一遍：会话里的第二个问题“那它的持久化呢？”</span>
+  <pre>历史（最近 10 条已完成消息）：
+  用户: Redis 为什么快？
+  助手: Redis 快主要有三点：纯内存操作、单线程避免上下文切换、IO 多路复用……（截到 200 字）
+
+① 查询改写：用默认配方调一次模型（即使是会话的第一个问题、没有历史，也会调这一次）
+   模型返回：Redis 的持久化机制有哪些
+   候选查询 = [ "Redis 的持久化机制有哪些", "那它的持久化呢？" ]
+
+② 档位按原问题算：“那它的持久化呢？”去空白 8 个字 → 中档，TopK 12，阈值 0.28
+   用第一个候选检索：kb_id in ['3', '5']，命中 5 条 → 直接用它，不再试第二个候选
+
+③ 拼提示词：5 个片段用 "\n\n---\n\n" 连接，填进 knowledgebase-query-user.st 的 {context}
+   ---文档内容开始---
+   RDB 是某一时刻的内存快照……
+   ---
+   AOF 以追加方式记录每条写命令……
+   ---文档内容结束---
+   ## 用户问题
+   那它的持久化呢？                 ← 注意填进去的是原问题，历史作为真正的对话消息另外传
+
+④ 流式输出：先攒 120 个字符的“探测窗口”
+   窗口内出现“没有找到相关信息 / 未检索到相关信息 / 信息不足 / 超出知识库范围 /
+   无法根据提供内容回答”之一 → 丢弃模型输出，只推一句固定文案并结束
+   否则把这 120 个字符一次性推出去，之后逐块透传</pre>
+</div>
+<p>一次问答因此是两次模型调用（改写 + 回答），检索没命中时是一次。改写的输入模板里 <code>{question}</code> 和 <code>{history}</code> 是直接上下拼接的，中间没有标题分隔，模型要自己判断“哪一行是问题、哪几行是历史”。</p>
 <div class="callout risk">
   <span class="label">RAG 部分可以深挖的问题</span>
-  <p><strong>学习资料触发护栏</strong>：问答走的是挂着 SafeGuard 的默认配方，关键词闸门会扫描检索到的资料；一份讲 Prompt 注入的学习笔记里只要出现“忽略之前的指令”，相关问题就会被固定回复“抱歉，我只能协助面试相关的任务”挡掉（<a href="agent-lab.html#e5">实验 E5</a>）。<strong>断开连接的占位消息</strong>：流式接口只处理了“完成”和“出错”，没处理“取消”。用户中途关页面，助手占位消息会永远停在未完成、内容为空。<strong>拒答判断会误伤</strong>：只要回答里出现“信息不足”等短语就整体替换成固定回复，而系统提示词恰恰要求模型在资料不全时“明确说明信息缺失”，一个“部分能答、部分信息不足”的正常回答可能被整段吞掉。<strong>配置漂移</strong>：提交 <span class="sha">1bf8f1b</span> 把短查询阈值的代码默认值从 0.18 提到 0.25，但 <code>application.yml</code> 里仍写着默认 0.18，yml 优先，实际生效的还是 0.18。<strong>规模化</strong>：<code>vector_store</code> 只有 HNSW 向量索引，元数据上没有索引，按 <code>kb_id</code> 删除、提升、清理都是全表扫描；HNSW 先取近邻再按元数据过滤，目标知识库在全库里占比很小时召回会明显不足，可以考虑表达式索引、分区，或 pgvector 0.8 的迭代扫描。<strong>检索质量</strong>：分块没有重叠，没有关键词检索做混合召回，没有重排，回答也不标注出处。</p>
+  <p><strong>学习资料触发护栏</strong>：问答走的是挂着 SafeGuard 的默认配方，关键词闸门会扫描检索到的资料；一份讲 Prompt 注入的学习笔记里只要出现“忽略之前的指令”，相关问题就会被固定回复“抱歉，我只能协助面试相关的任务”挡掉（<a href="agent-lab.html#e5">实验 E5</a>）。<strong>断开连接的占位消息</strong>：流式接口只处理了“完成”和“出错”，没处理“取消”。用户中途关页面，助手占位消息会永远停在未完成、内容为空。<strong>拒答判断会误伤</strong>：非流式接口只要整段回答里任何位置出现“信息不足”等 5 个短语之一，就整体替换成固定回复；流式接口只检查前 120 个字符。而用户提示词的回答要求里恰恰写着“如无相关信息，仅用 1-2 句说明信息不足”，等于教模型说出触发过滤的那个词。一个“前半段正常回答、最后一句说某方面信息不足”的回答，在非流式接口里会被整段吞掉，在流式接口里却能完整显示，两个接口对同一个问题的表现不一致。<strong>配置漂移</strong>：提交 <span class="sha">1bf8f1b</span> 把短查询阈值的代码默认值从 0.18 提到 0.25，但 <code>application.yml</code> 里仍写着默认 0.18，yml 优先，实际生效的还是 0.18。<strong>规模化</strong>：<code>vector_store</code> 只有 HNSW 向量索引，元数据上没有索引，按 <code>kb_id</code> 删除、提升、清理都是全表扫描；HNSW 先取近邻再按元数据过滤，目标知识库在全库里占比很小时召回会明显不足，可以考虑表达式索引、分区，或 pgvector 0.8 的迭代扫描。<strong>检索质量</strong>：分块没有重叠，没有关键词检索做混合召回，没有重排，回答也不标注出处。</p>
 </div>
 
 <h2 id="kb-interview">题库与题库面试</h2>
@@ -248,7 +351,12 @@
   <li>典型案例、常见问题、应用场景、最佳实践</li>
 </ul>
 <p>片段按文本去重，最多 12 个，拼起来截断到 5000 字，用随机分隔符包好。Prompt 里还会告诉模型这个知识库已有哪些方向（前 10 个及题数，引导复用方向名）以及同难度最近 20 道题（避免重复）。调用用的是不带工具的 plain 配方，结果走结构化输出。落库前逐题清洗：空题干跳过；题干做 Unicode 规范化、转小写、只保留字母数字后比较，重复的跳过并计数；方向为空时用知识库名；追问截断到请求的数量。每道题还记录了生成时用的上下文和知识库内容哈希。</p>
-<p>用四个固定的探针查询代替“随机取片段”，是在低成本下尽量覆盖资料的不同侧面：概念题、流程题、边界题、场景题各有来源。代价是资料很长时，12 个片段只覆盖其中一小部分。</p>
+<p>用四个固定的探针查询代替“随机取片段”，设计意图是在低成本下覆盖资料的不同侧面：概念题、流程题、边界题、场景题各有来源。但把真实数字代进去，这个意图基本落空了：</p>
+<div class="callout risk">
+  <span class="label">5000 字符的截断让后三个探针几乎不起作用</span>
+  <p>片段是按探针顺序收集的：先放“核心概念 定义 背景 原理”的 4 个结果，再放第二个探针的，以此类推，最后整体截到 5000 字符。而 <code>TokenTextSplitter</code> 默认每块约 800 token，中文资料一块通常有一两千个字符。用仓库里两份真实文档实测：README.md 分出的 12 块平均 1600 字符，<code>docs/voice-interview-architecture.md</code> 的 7 块平均 1479 字符，5000 字符都只能完整放下 3 块。也就是说，送进模型的上下文基本就是第一个探针的前 3 个结果，第二个探针最多露出半块，“流程 / 边界 / 场景”三个探针的结果被截掉了。“最多 12 个片段”只在资料很碎、每块很短时才成立。修法可以是每个探针只取 1–2 块并按探针轮流放，或者把上限按片段数而不是字符数来算。</p>
+</div>
+<p>落库前的去重规则（<code>buildEntities</code>）也可以具体到代码：题干先做 Unicode NFC 规范化，再转小写，然后只保留 <code>Character.isLetterOrDigit</code> 为真的字符（汉字也算 letter，空格和标点被去掉）进行比较。所以“什么是 Redis 的 AOF？”和“什么是redis的AOF”被视为重复，第二道跳过并计入 <code>skippedCount</code>，完成消息就是“已生成 4 道题，跳过 1 道重复题”。</p>
 <h3 id="kb-bank">题目状态与维护</h3>
 <p>题目有四种状态：生成出来是草稿（DRAFT），人工确认后启用（ACTIVE），不想用了归档（ARCHIVED），还有一个预留的过期（STALE），代码里目前没有任何地方会把题目置为过期。只有 ACTIVE 的题会被抽进面试。题库页支持按状态和方向筛选、分页、批量选择、编辑题干和参考答案、手动新增题目。</p>
 <h3 id="kb-capacity">容量矩阵与严格抽题</h3>
@@ -267,7 +375,25 @@
   </table>
 </div>
 <p class="small muted">表中数字为示意。每一行的含义是“追问池里至少有这么多个有效追问的启用题有几道”；同时返回各方向的可用题数，按数量降序，前端据此禁用不可行的选项并给出提示。</p>
-<p>抽题时，先筛出“方向、难度匹配、状态启用、追问数够”的候选题，打乱后取前 N 道；每道题的追问再从追问池里随机取指定个数（局部 Fisher–Yates 洗牌，不改动原列表），让同一道题每次的追问组合不同。万一在“查容量”和“开始”之间题库被改了导致追问不够，直接报错而不是少问几个。组装好的题目列表交给文字面试的会话服务创建会话，来源标记为 KNOWLEDGE_BASE，之后答题、评估、报告全部复用文字面试的链路。</p>
+<p>抽题时，先筛出“方向、难度匹配、状态启用、追问数够”的候选题，打乱后取前 N 道；每道题的追问再从追问池里随机取指定个数（局部 Fisher–Yates 洗牌，不改动原列表），让同一道题每次的追问组合不同。“局部洗牌”在代码里就是下面这几行：只需要前 <code>count</code> 个位置是随机的，所以只交换 <code>count</code> 次，而不是把整个池子洗一遍：</p>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · KnowledgeBaseInterviewService.pickFollowUps</span></div>
+  <pre>if (pool == null || pool.size() &lt; count) {
+    throw new BusinessException(ErrorCode.INTERVIEW_QUESTION_INSUFFICIENT,
+        "追问池在组装面试时发生变化，无法严格抽取 " + count + " 个追问");
+}
+if (count == pool.size()) return new ArrayList&lt;&gt;(pool);
+List&lt;KnowledgeBaseQuestionFollowUpDTO&gt; copy = new ArrayList&lt;&gt;(pool);   // 复制一份，不动原列表
+for (int i = 0; i &lt; count; i += 1) {
+    int j = random.nextInt(i, copy.size());      // 在 [i, size) 里随机选一个
+    swap(copy, i, j);                            // 换到第 i 位
+}
+return copy.subList(0, count);
+// 例：追问池 [A, B, C, D, E]，count = 2
+//   i=0：从 0–4 里抽到 3 → [D, B, C, A, E]
+//   i=1：从 1–4 里抽到 4 → [D, E, C, A, B] → 取前两个 [D, E]</pre>
+</div>
+<p>万一在“查容量”和“开始”之间题库被改了导致追问不够，直接报错而不是少问几个。组装好的题目列表交给文字面试的会话服务创建会话，来源标记为 KNOWLEDGE_BASE，之后答题、评估、报告全部复用文字面试的链路。</p>
 <p>这部分的边界是用测试逼出来的：<span class="sha">54e1bb0</span> 先写严格容量的测试，<span class="sha">9cdcb8c</span> 严格校验追问数量，<span class="sha">0b99aaa</span> 完善容量边界；完成面试后的跳转与结果展示也是 <span class="sha">20ca85c</span> 先复现、<span class="sha">1f82388</span> 再修复。</p>
 <h3 id="kb-notes">实现细节与问题</h3>
 <ul>
@@ -289,7 +415,23 @@
 <p>这个设计的出发点是成本和确定性：格式规整的邀约用正则就够了，毫秒级、零成本、结果确定；只有规则搞不定的才花一次模型调用。另有一个每小时整点执行的定时任务，把时间已过、仍是“待面试”的日程批量改成“已取消”。</p>
 <h3 id="schedule-notes">实现细节与问题</h3>
 <ul>
-  <li><strong>会议号重复</strong>：腾讯会议解析器取的是整个匹配而不是捕获组，结果会变成“会议号: 会议号：123456789”，密码同理。</li>
+  <li><strong>会议号重复</strong>：腾讯会议解析器取的是整个匹配而不是捕获组，结果会变成“会议号: 会议号：123456789”，密码同理。用一段邀约实际跑一遍腾讯会议的正则：
+    <div class="callout example">
+      <span class="label">走一遍：腾讯会议规则解析的输入与输出</span>
+      <pre>输入：
+  【面试邀请】
+  公司：字节跳动 抖音电商
+  岗位：后端开发工程师
+  时间：2026-09-03 14:00
+  腾讯会议 会议号：123456789 密码：8888
+
+(?:会议号|ID)[：:]?\s*(\d{9,})  用 group() 取整个匹配 → meetingLink = "会议号: 会议号：123456789 密码: 密码：8888"
+(?:公司|单位)[：:]\s*([^\s\n]{1,50})  取到第一个空白为止  → companyName = "字节跳动"（“抖音电商”丢了）
+(\d{4}[-/]\d{2}[-/]\d{2})\s+(\d{2}:\d{2})                → interviewTime = 2026-09-03 14:00
+
+而腾讯会议客户端复制出来的真实邀请写的是“#腾讯会议：123-456-789”，
+会议号带短横线、前缀也不是“会议号”，这条正则根本匹配不到。</pre>
+    </div></li>
   <li><strong>Zoom 规则永远不完整</strong>：Zoom 解析器只提取链接和时间，不提取公司和岗位，而“成功”要求三者齐全，所以 Zoom 邀约的规则解析形同虚设，必然走模型。事实上多数真实邀约没有“公司：”“岗位：”这样的标签，飞书和腾讯的规则也很难命中。</li>
   <li><strong>来源被当成了模型 ID</strong>：模型兜底时把来源参数（feishu、tencent、zoom）当作 Provider ID 传进注册表，会因为找不到 Provider 而失败。前端目前不传来源，所以没有暴露，但接口本身是坏的。</li>
   <li><strong>过期即取消的语义</strong>：面试时间过了不代表面试取消了，更可能是面试已经进行、用户没来得及标记。自动改成“待确认”会更贴近真实情况。</li>
@@ -299,7 +441,19 @@
 <h2 id="settings">系统设置</h2>
 <p>设置页管理模型 Provider：新增、编辑、删除、测试连通性，分别选择默认的聊天模型和默认的向量模型，以及语音识别与合成的参数。注册表本身的设计见 <a href="ai-foundation.html#registry">AI 底座 · 多模型注册表</a>，这里讲设置功能的实现。</p>
 <ul>
-  <li><strong>Key 加密存储</strong>：API Key 用 AES-GCM 加密后存库，每次加密生成 12 字节随机 nonce，认证标签 128 位，nonce 和密文分别 Base64 存储。主密钥来自环境变量：如果是 32 字节的 Base64 就直接用，否则对字符串做 SHA-256 得到密钥。没配置主密钥时默认拒绝启动，只有显式打开开发开关才会用内置的开发密钥。接口返回的永远是打码后的 Key。</li>
+  <li><strong>Key 加密存储</strong>：API Key 用 AES-GCM 加密后存库，每次加密生成 12 字节随机 nonce，认证标签 128 位，nonce 和密文分别 Base64 存储。主密钥来自环境变量：如果是 32 字节的 Base64 就直接用，否则对字符串做 SHA-256 得到密钥。没配置主密钥时默认拒绝启动，只有显式打开开发开关才会用内置的开发密钥。接口返回的永远是打码后的 Key。
+    <div class="callout example">
+      <span class="label">走一遍：保存一个 Key 之后库里存的是什么</span>
+      <pre>APP_AI_CONFIG_ENCRYPTION_KEY=my-local-secret     → 不是 32 字节 Base64 → SHA-256 得到 32 字节 AES-256 密钥
+明文 Key（35 字符）：sk-4f1c2e9a7b3d48e6a0c5f19d2b7e8a31
+llm_provider_config.api_key_nonce      = 8gg+F7DBl0Iy6Ou5                     （12 字节随机数的 Base64）
+llm_provider_config.api_key_ciphertext = X4qZ/adeZiVpq3+KFW9Q+SOSZ2VJ…         （35 字节密文 + 16 字节认证标签 = 51 字节）
+设置页看到的 maskedApiKey              = sk-***a31                            （前 3 位 + *** + 后 3 位）
+
+同一个 Key 再保存一次，nonce 不同，密文也完全不同；
+改了 APP_AI_CONFIG_ENCRYPTION_KEY 之后，解密时 GCM 校验认证标签失败，
+报“解密 Provider API Key 失败，请检查 APP_AI_CONFIG_ENCRYPTION_KEY”。</pre>
+    </div></li>
   <li><strong>连通性测试</strong>：用 Provider 的配置发一个最小请求（一句“Reply with OK only.”，<code>max_tokens</code> 为 1），先试 <code>{baseUrl}/chat/completions</code>，地址里没有版本号时再试 <code>/v1/chat/completions</code>；连接超时 5 秒、读超时 10 秒；失败时把状态码和截断后的响应体返回给页面，方便排查。</li>
   <li><strong>SSRF 防护</strong>：测试请求用的 HTTP 客户端挂了地址过滤器，只允许公网地址、回环地址和 198.18.0.0/15。放行回环是为了支持本机的 LM Studio，放行 198.18.0.0/15 是因为很多本地代理工具的 fake-ip 模式会把域名解析到这个网段。</li>
   <li><strong>向量模型防呆</strong>：开启向量能力的 Provider 必须填向量模型名和维度，模型名如果像聊天模型（以 glm-、deepseek、qwen、kimi 等开头）会被拒绝，并提示该厂商推荐的向量模型名。这是踩过坑之后加的：把聊天模型填成向量模型，向量化会全部失败。</li>

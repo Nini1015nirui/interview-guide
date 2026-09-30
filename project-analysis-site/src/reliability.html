@@ -122,7 +122,7 @@
    它每轮的 XAUTOCLAIM 都会检查，直到这条消息空闲满 300000 毫秒（5 分钟）才被转到自己名下重新处理
    在此之前数据库里 analyze_status 一直显示 PROCESSING</pre>
 </div>
-<div class="prompt">
+<div class="prompt code">
   <div class="prompt-head"><span>源码节选 · common/async/AbstractStreamConsumer.processMessage（省略日志）</span></div>
   <pre>T payload;
 try {
@@ -184,7 +184,7 @@ try {
   <li><strong>小事务执行器</strong>：简历“重新分析”先用 <code>TransactionalExecutor.run</code> 把状态改回 PENDING 并提交，再在事务外投递。这个执行器还解决了同类方法内部调用导致 <code>@Transactional</code> 失效的问题。</li></ul>
 <div class="split">
   <div>
-    <div class="prompt">
+    <div class="prompt code">
       <div class="prompt-head"><span>VoiceInterviewService.sendEvaluateTaskAfterCommit</span></div>
       <pre>Runnable sendTask = () -&gt;
     voiceEvaluateStreamProducer.sendEvaluateTask(sessionId.toString());
@@ -202,7 +202,7 @@ TransactionSynchronizationManager.registerSynchronization(
     </div>
   </div>
   <div>
-    <div class="prompt">
+    <div class="prompt code">
       <div class="prompt-head"><span>TransactionalExecutor + ResumeUploadService.reanalyze</span></div>
       <pre>@Service
 public class TransactionalExecutor {
@@ -272,7 +272,7 @@ analyzeStreamProducer.sendAnalyzeTask(resumeId, taskContent);</pre>
   <figcaption>每一条箭头都是一次“锁住知识库行 → 核对 taskId 和当前状态 → 符合才更新”的小事务。旧 Worker 手里的 taskId 已经不是当前值，它发起的任何迁移都会比较失败，结果被丢弃。</figcaption>
 </figure>
 <p>“围栏令牌”（fencing token）这个词听起来抽象，落到代码里就是一个字符串比较。所有状态迁移方法都长一个样：先 <code>SELECT … FOR UPDATE</code> 锁住知识库这一行，再调用同一个 <code>matches</code> 判断，不满足就返回 <code>false</code>、什么都不改：</p>
-<div class="prompt">
+<div class="prompt code">
   <div class="prompt-head"><span>源码节选 · knowledgebase/service/QuestionGenerationStateService.java</span></div>
   <pre>@Lock(LockModeType.PESSIMISTIC_WRITE)                        // KnowledgeBaseRepository
 @Query("SELECT k FROM KnowledgeBaseEntity k WHERE k.id = :id")
@@ -411,7 +411,7 @@ public boolean replaceQuestionsAndComplete(Long knowledgeBaseId, String taskId,
   </div>
   <figcaption>三层保护各有分工：锁让并发的重复请求排队，Redis 映射让后续请求快速返回，数据库唯一索引是 Redis 丢数据时的最终真相。创建成功后前端用 replace 跳到 /interview/session/{id}，此后刷新走“恢复会话”而不是“创建”。</figcaption>
 </figure>
-<div class="prompt">
+<div class="prompt code">
   <div class="prompt-head"><span>源码节选 · interview/service/InterviewSessionService.java</span></div>
   <pre>private static final String CREATE_LOCK_PREFIX = "interview:create:";
 private static final String CREATE_RESULT_PREFIX = "interview:create:result:";
@@ -521,7 +521,7 @@ t=35s  B: 拿到锁 → GET interview:create:result:9b2f7c1e-… → c0ffee12ab3
 <p>每条规则对应两个 Redis 键：<code>…:value</code> 存当前剩余令牌数，<code>…:permits</code> 是一个有序集合，记录每次发放（分数是时间戳，成员是“请求 ID:规则序号:数量”）。判断时，可用令牌 = 当前值（不存在则为上限）+ 已经滑出时间窗口的发放记录之和，封顶为上限。这是“滑动窗口 + 过期令牌回补”的组合，精度比固定窗口高，代价是每次放行都要在有序集合里记一条。</p>
 <p>键名形如 <code>ratelimit:{Class:method}:ip:1.2.3.4</code>。花括号是 Redis Cluster 的 hash tag，保证同一个方法的所有维度落在同一个槽位上，这是能在一个 Lua 脚本里同时操作多个键的前提。</p>
 <p>切面每次请求做的事：生成一个 UUID 当请求 ID，按注解顺序把每条规则翻译成“1 个令牌、窗口毫秒数、上限”三个参数，一次 <code>EVALSHA</code> 调用。以简历“重新分析”接口为例，它上面的两条注解和对应的调用是：</p>
-<div class="prompt">
+<div class="prompt code">
   <div class="prompt-head"><span>从注解到 Lua 调用 · ResumeController.reanalyze</span></div>
   <pre>@PostMapping("/api/resumes/{id}/reanalyze")
 @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 2)   // interval 默认 1，单位默认秒
@@ -537,7 +537,7 @@ EVALSHA &lt;sha&gt; 2
   1 1000 2                                               ← 规则 1：申请 1 个，窗口 1000ms，上限 2
   1 1000 2                                               ← 规则 2</pre>
 </div>
-<div class="prompt">
+<div class="prompt code">
   <div class="prompt-head"><span>源码节选 · resources/scripts/rate_limit_single.lua 第一阶段（只读）</span></div>
   <pre>for i = 1, rule_count do
     local current_val = tonumber(redis.call("get", value_key)) or max_tokens   -- 没有键就当满额

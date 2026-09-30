@@ -1070,6 +1070,14 @@ figure.diagram figcaption {
   color: var(--ink);
 }
 
+/* 源码节选：保留缩进与对齐，窄屏时在块内横向滚动而不是折行 */
+.prompt.code pre {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
 .copy-btn {
   font: inherit;
   font-size: 0.78rem;
