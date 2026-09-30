@@ -179,7 +179,7 @@
   <div class="prompt-head"><span>阶段 3 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p3">复制</button></div>
   <pre id="prompt-p3">实现 common/ai：
 1. LlmProviderRegistry：所有 Provider 走 OpenAI 兼容协议。按 Provider 缓存底层 ChatModel，在其上组装三种 ChatClient 配方并分别缓存：default、plain（无工具，用于结构化生成）、voice（后续阶段用）。提供 getChatClientOrDefault(providerId)、getPlainChatClient(providerId) 和 reload()。baseUrl 的 /v1 路径差异用一个独立的 ApiPathResolver 处理并写单测。
-2. 连接超时 10s、读超时 300s，关闭 Spring AI 自带重试（避免与我们的重试相乘）。
+2. 连接超时 10s、读超时 300s，关闭 Spring AI 自带重试（避免与我们的重试相乘）；构建 OpenAI SDK 客户端时显式设置 maxRetries（SDK 默认会对 429、5xx 和超时再重试 2 次，spring.ai.retry 管不到它）。
 3. StructuredOutputInvoker：用 BeanOutputConverter 生成格式说明并开启 schema 校验；失败时把上一次的错误原因截断到 200 字，拼成修复提示重试，默认最多 2 次；按业务场景打 Micrometer 指标（成功、重试、失败）。所有结构化场景默认使用 plain 配方。
 4. Prompt 模板放 resources/prompts/*.st。注意 StringTemplate 用花括号做占位符，模板里写 JSON 示例时要转义；为每个模板写一个“渲染后包含关键变量内容”的测试。
 5. 简历分析：五个维度（项目 40、技能匹配 20、内容 15、结构 15、表达 10），输出优势和“原句 vs 优化句”式建议。简历正文用带随机 UUID 的边界标签包裹，系统提示词声明边界内是数据。

@@ -151,6 +151,7 @@ command=custom 时工具返回："Skill not found: custom"</pre>
 （外层 StructuredOutputInvoker 2 次 × 每次 validateSchema() 内部 1+3 次）</pre>
 </div>
 <p><strong>结论</strong>：<code>spring.ai.retry.max-attempts: 1</code> 只关掉了网络层重试，<code>validateSchema()</code> 插入的校验 Advisor 自带最多 3 次重复，和外层的 2 次相乘。项目的尝试次数指标只统计外层，看到的是 2，实际是 8。对应发现 <a href="#findings">A03</a>。</p>
+<p>这 8 次是“模型每次都返回了、但格式不对”的情况。如果失败原因是 429、5xx 或网络超时，还有第三层：Spring AI 2.0 底层的 OpenAI Java SDK 对这些错误默认自动重试 2 次，<code>spring.ai.retry.max-attempts</code> 管不到它。用项目的客户端构建方式连接本地假服务实测，一次 429 在服务端被请求了 3 次（请求头 <code>x-stainless-retry-count</code> 依次为 0、1、2），见 <a href="architecture.html#exception-handler">架构 · 全局异常处理</a>。</p>
 
 <h2 id="e5">E5 关键词闸门会不会误伤</h2>
 <div class="prompt">
@@ -236,7 +237,7 @@ RRF 融合（向量排序 A,B,C,D + 关键词排序 C,E,A，取前 4）→ [chun
       <tr>
         <td>A03 <span class="tag amber">P2</span></td>
         <td><code>StructuredOutputInvoker</code> + <code>validateSchema()</code></td>
-        <td>外层 2 次 × 内层校验 1+3 次，最坏 8 次模型请求；尝试次数指标只统计外层，低估 4 倍。</td>
+        <td>外层 2 次 × 内层校验 1+3 次，最坏 8 次模型请求；尝试次数指标只统计外层，低估 4 倍。遇到 429 / 5xx / 超时时，OpenAI Java SDK 还会对每个请求自行重试 2 次。</td>
         <td>E4；<code>StructuredOutputValidationAdvisor</code> 默认 3 次</td>
         <td>只保留一层带错误反馈的重试并设总预算；指标改为统计真实模型请求。</td>
       </tr>

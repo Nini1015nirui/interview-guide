@@ -1039,6 +1039,19 @@ figure.diagram figcaption {
   color: var(--ink-2);
 }
 
+.qa-src {
+  font-size: 0.88rem;
+  color: var(--ink-2);
+  border-left: 3px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+.qa-src .qa-src-label {
+  font-weight: 700;
+  color: var(--good);
+  margin-right: 0.4em;
+}
+
 /* ---------- 提示词块 ---------- */
 .prompt {
   margin: 1.3rem 0;
