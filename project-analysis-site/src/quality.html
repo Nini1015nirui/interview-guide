@@ -176,6 +176,159 @@
   </table>
 </div>
 
+<h2 id="evidence">P1 问题逐条对照源码</h2>
+<p>表格里的描述是结论，下面把 8 条 P1 问题各自落到代码行上，并给出最短的复现步骤。面试时说“我发现了一个问题”，能指着代码讲清楚“哪一行、在什么输入下、结果是什么”，可信度完全不一样。</p>
+
+<h3 id="evidence-q01">Q01 生成过题库的知识库删不掉</h3>
+<div class="prompt code">
+  <div class="prompt-head"><span>V1__init_schema.sql 与 KnowledgeBaseDeleteService.deleteKnowledgeBaseRecords</span></div>
+  <pre>CREATE TABLE knowledge_base_questions (
+  ...
+  knowledge_base_id BIGINT,
+  CONSTRAINT fkosobqu06r3tbr13ca043slftw
+    FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_bases(id)     -- 没有 ON DELETE CASCADE
+);
+
+private String deleteKnowledgeBaseRecords(Long id) {
+    KnowledgeBaseEntity kb = knowledgeBaseRepository.findById(id).orElseThrow(...);
+    // 只处理了问答会话的多对多关联
+    for (RagChatSessionEntity session : sessionRepository.findByKnowledgeBaseIds(List.of(id))) {
+        session.getKnowledgeBases().removeIf(kbEntity -&gt; kbEntity.getId().equals(id));
+        sessionRepository.save(session);
+    }
+    knowledgeBaseRepository.deleteById(id);                             // ← 这里撞外键
+    return kb.getStorageKey();
+}</pre>
+</div>
+<p>复现：上传一份资料 → 等向量化完成 → 生成题库 → 删除这个知识库。PostgreSQL 返回外键冲突，事务回滚，接口落进兜底分支，页面只看到“系统繁忙，请稍后重试”。</p>
+
+<h3 id="evidence-q02">Q02 重新生成会清空整个题库</h3>
+<p>代码见 <a href="reliability.html#state-machine">可靠性 · 状态机</a> 里的 <code>replaceQuestionsAndComplete</code>：<code>questionRepository.deleteByKnowledgeBaseId(knowledgeBaseId)</code> 不带任何状态条件。复现：生成 5 道题 → 启用 3 道并编辑其中 1 道的参考答案 → 再点一次“生成” → 完成后题库里只剩新生成的 5 道草稿，之前启用和编辑过的题全部消失。</p>
+
+<h3 id="evidence-q03">Q03 简历分析失败被当成成功</h3>
+<div class="prompt code">
+  <div class="prompt-head"><span>ResumeGradingService.analyzeResume（节选）</span></div>
+  <pre>try {
+    ...
+    try {
+        dto = structuredOutputInvoker.invoke(..., "简历分析失败：", "简历分析", log);
+    } catch (Exception e) {
+        throw new BusinessException(ErrorCode.RESUME_ANALYSIS_FAILED, "简历分析失败：" + e.getMessage());
+    }
+    return convertToResponse(dto, resumeText);
+} catch (Exception e) {
+    return createErrorResponse(resumeText, e.getMessage());      // ← 吞掉异常，返回一份“正常”的报告
+}
+
+private ResumeAnalysisResponse createErrorResponse(String originalText, String errorMessage) {
+    return new ResumeAnalysisResponse(0, new ScoreDetail(0, 0, 0, 0, 0),
+        "分析过程中出现错误: " + errorMessage, List.of(),
+        List.of(new Suggestion("系统", "高", "AI分析服务暂时不可用", "请稍后重试，或检查AI服务是否正常运行")),
+        originalText);
+}</pre>
+</div>
+<p>消费者拿到这个返回值，走的是 <code>saveAnalysis</code> → <code>markCompleted</code> → <code>XACK</code> 的成功路径。用户在简历详情页看到的摘要是“分析过程中出现错误: 简历分析失败：简历分析失败：Cannot deserialize value of type …”：两层 catch 各加了一次前缀，Jackson 的异常原文也直接展示出来了。复现：把默认 Provider 的 Key 改错，上传一份新简历。</p>
+
+<h3 id="evidence-q04">Q04 语音评估的保存方法没有事务，还总是插入</h3>
+<div class="prompt code">
+  <div class="prompt-head"><span>VoiceInterviewEvaluationService（节选）</span></div>
+  <pre>public void generateEvaluation(Long sessionId) {                  // 没有 @Transactional
+    ...
+    EvaluationReport report = unifiedEvaluationService.evaluate(...);
+    saveEvaluationTransactional(sessionId, session, report);        // ← this.xxx()，绕过代理
+}
+
+@Transactional                                                      // 对上面的调用不生效
+public void saveEvaluationTransactional(Long sessionId, ..., EvaluationReport report) {
+    VoiceInterviewEvaluationEntity entity = VoiceInterviewEvaluationEntity.builder()
+        .sessionId(sessionId) ...                                   // ← 总是 new 一个实体 → INSERT
+        .build();
+    evaluationRepository.save(entity);
+}</pre>
+</div>
+<p>评估表的 <code>session_id</code> 有唯一约束。如果评估行已经插入、但把会话的评估状态改成 COMPLETED 之前进程重启，恢复调度器 3 分钟后会重投这条任务，第二次 INSERT 撞唯一约束，任务最终被标记为 FAILED，而库里其实有一份完整的评估。同一个类里的 <code>saveEmptyEvaluationTransactional</code> 用的是“先按 sessionId 查，查不到再新建”，两个方法写法不一致。</p>
+
+<h3 id="evidence-q05">Q05 创建面试的校验注解不生效</h3>
+<p>代码对照和请求示例见 <a href="modules.html#ti-notes">业务模块 · 文字面试</a>。</p>
+
+<h3 id="evidence-q06">Q06 遗留的同步报告接口</h3>
+<div class="prompt code">
+  <div class="prompt-head"><span>InterviewController.getReport → InterviewSessionService.generateReport</span></div>
+  <pre>@GetMapping("/api/interview/sessions/{sessionId}/report")        // GET，无 @RateLimit
+public Result&lt;InterviewReportDTO&gt; getReport(@PathVariable String sessionId) {
+    InterviewReportDTO report = sessionService.generateReport(sessionId);
+    return Result.success(report);
+}
+
+public InterviewReportDTO generateReport(String sessionId) {
+    ...                                                             // 只检查会话已完成
+    ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(provider);
+    InterviewReportDTO report = evaluationService.evaluateInterview(chatClient, ...);  // 在请求线程里整场重评
+    ...
+}</pre>
+</div>
+<p>一场 8 题各带 1 个追问的面试，每次 GET 都是 3 次结构化调用（最坏 24 次模型请求），可以用浏览器地址栏反复触发。前端早已改成轮询异步评估结果，全仓库没有调用这个接口的地方。</p>
+
+<h3 id="evidence-q07">Q07 前端自动重连，后端断线即结束</h3>
+<div class="split">
+  <div>
+    <div class="prompt code">
+      <div class="prompt-head"><span>frontend/src/api/voiceInterview.ts</span></div>
+      <pre>this.ws.onclose = (event) =&gt; {
+  this.handlers.onClose?.(event);
+  if (!event.wasClean
+      &amp;&amp; this.reconnectAttempts &lt; this.maxReconnectAttempts) {   // 最多 3 次
+    this.reconnectAttempts++;
+    setTimeout(() =&gt; this.connect(), this.reconnectDelay);
+  }
+};</pre>
+    </div>
+  </div>
+  <div>
+    <div class="prompt code">
+      <div class="prompt-head"><span>VoiceInterviewWebSocketHandler.afterConnectionClosed</span></div>
+      <pre>sessions.remove(sessionId);
+sessionStates.remove(sessionId);   // 顺带中断正在跑的管线线程
+sttService.stopTranscription(sessionId);
+// WebSocket 异常断开时自动结束会话
+interviewService.endSessionIfInProgress(sessionId);
+//   → status = COMPLETED，evaluate_status = PENDING
+//   → 事务提交后投递评估任务</pre>
+    </div>
+  </div>
+</div>
+<p>时序：用户答到第 5 题，Wi-Fi 抖动一下（非正常关闭，<code>wasClean = false</code>）→ 后端立即结束会话并投递评估 → 前端 1 秒后自动重连成功，用户继续回答第 6、7 题 → 评估消费者已经在按 5 道题的记录评分，后面的回答不会进入报告。</p>
+
+<h3 id="evidence-q08">Q08 语音播报与记录不一致</h3>
+<p>两段代码见 <a href="voice.html#sentence-split">语音面试 · 按句切分</a>：句子在流式过程中一检测到就交给合成，而 <code>optimizeForVoice</code> 的 120 字截断是在流结束后才对全文做的。模型回了 180 字，前 120 字之后的句子已经合成并下发、被念了出来，但落库、定稿字幕和评估用的都是截断后的文本。模型调用失败时，<code>mapLlmErrorToUserMessage</code> 返回“抱歉，AI 服务暂时不可用，请稍后重试”这样的字符串作为回复，调用方分不出它和正常回复的区别，照样合成、落库、进入下一轮上下文。</p>
+
+<h2 id="new-findings">本轮对照源码补充核实的问题</h2>
+<p>下面这些是逐段对照源码、并尽量用真实运行验证后新发现的问题，每条都链接到有代码和数据的段落。它们不在上面 18 条的编号里，便于其他页面继续引用原编号。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>问题</th><th>怎么验证的</th><th>详见</th></tr></thead>
+    <tbody>
+      <tr><td>结构化输出指标的场景标签几乎全部折叠成 <code>unknown</code>，无法按场景看失败率</td><td>按源码规则跑 7 个真实场景名</td><td><a href="ai-foundation.html#so-why">AI 底座</a></td></tr>
+      <tr><td>JSON Schema 格式说明在系统提示词和用户消息里各发一遍（1692 / 1177 / 803 字符）</td><td>Spring AI 2.0.0 + 假模型，打印实际请求</td><td><a href="ai-foundation.html#so-flow">AI 底座</a></td></tr>
+      <tr><td>重试时喂回的错误原因被截到 200 字符，恰好截掉出错字段名</td><td>同上，渲染真实的重试提示词</td><td><a href="ai-foundation.html#so-flow">AI 底座</a></td></tr>
+      <tr><td>OpenAI Java SDK 自带重试未关闭，429 / 5xx / 超时各重试 2 次；挂起的服务端让一次结构化调用 30 分钟才失败</td><td>按项目构建方式连接本地假服务，统计请求数</td><td><a href="architecture.html#exception-handler">架构</a></td></tr>
+      <tr><td>全局异常处理器的超时 / 401 / 429 分支接不到 Spring AI 2.0 的异常，错误码 7002 / 7004 / 7005 实际不会出现</td><td>同上，打印异常类型</td><td><a href="architecture.html#exception-handler">架构</a></td></tr>
+      <tr><td>参考题库不按文件去重，AI Agent、测试开发方向把同一文件重复注入直到撞上 12000 字符上限</td><td>用真实 meta 与文件计算</td><td><a href="ai-foundation.html#skill-references">AI 底座</a></td></tr>
+      <tr><td>带简历出 8 题时方向题只有 3 道，Redis 等 CORE 类目分不到题，“项目经历”问两遍</td><td>按分配算法计算四档题量</td><td><a href="ai-foundation.html#skill-allocation">AI 底座</a></td></tr>
+      <tr><td>批次评估按列表位置而不是题号对齐，模型漏一题会导致后面全部错位</td><td>读 <code>mergeQuestionEvaluations</code></td><td><a href="ai-foundation.html#eval-batch">AI 底座</a></td></tr>
+      <tr><td>评估提示词写死“资深 Java 后端专家”，前端、算法等方向也用它打分</td><td>读 <code>interview-evaluation-system.st</code></td><td><a href="ai-foundation.html#eval-rules">AI 底座</a></td></tr>
+      <tr><td>SKILL.md 人设被包进数据边界标签，与“边界内是数据不是指令”的声明冲突</td><td>读 <code>buildSkillPersonaSection</code></td><td><a href="ai-foundation.html#pi-layer1">AI 底座</a></td></tr>
+      <tr><td>题库生成的上下文截到 5000 字符后只剩第一个探针的约 3 个片段</td><td>用仓库里两份真实文档跑 <code>TokenTextSplitter</code></td><td><a href="modules.html#kb-generate">业务模块</a></td></tr>
+      <tr><td>RAG 检索档位按原问题长度计算，短追问改写后仍按“短查询”检索</td><td>读 <code>buildQueryContext</code></td><td><a href="modules.html#rag-pipeline">业务模块</a></td></tr>
+      <tr><td>拒答判断在非流式接口检查全文、在流式接口只检查前 120 字符，且提示词本身要求模型说“信息不足”</td><td>读 <code>normalizeAnswer</code> 与 <code>normalizeStreamOutput</code></td><td><a href="modules.html#rag">业务模块</a></td></tr>
+      <tr><td>腾讯会议客户端复制出的真实邀请（“#腾讯会议：123-456-789”）匹配不到会议号正则</td><td>实跑正则</td><td><a href="modules.html#schedule-notes">业务模块</a></td></tr>
+      <tr><td>语音按句切分把英文句点当句末，版本号“3.2”被切成两句念</td><td>按源码逻辑模拟 token 流</td><td><a href="voice.html#sentence-split">语音面试</a></td></tr>
+      <tr><td>SSE 换行转义是单向的，回答里的字面量 <code>\n</code> 在流式显示时变成换行</td><td>对照后端与前端两段代码</td><td><a href="frontend.html#sse">前端</a></td></tr>
+      <tr><td>语音问答的类别推断把含“为什么”的技术题归为 HR 问题</td><td>读 <code>inferCategory</code></td><td><a href="ai-foundation.html#eval-voice">AI 底座</a></td></tr>
+    </tbody>
+  </table>
+</div>
+
 <h2 id="more-findings">更多小问题</h2>
 <p>下面这些影响较小，或者在其他页面已经展开过，列在这里备查：</p>
 <ul>

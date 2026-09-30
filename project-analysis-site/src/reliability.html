@@ -345,7 +345,7 @@ public boolean replaceQuestionsAndComplete(Long knowledgeBaseId, String taskId,
 10:25  Worker1 完成 → replaceQuestionsAndComplete(7, A)：状态是 QUEUED 不是 PROCESSING → 结果被丢弃
 10:25  消费线程读到重发的消息 → tryMarkProcessing(7, A) ✓ → 从头再生成一遍</pre>
 </div>
-<p>也就是说，围栏区分的是“不同的提交”；同一个 taskId 在超时重投后可能有两个 Worker 同时在跑，这时靠“状态必须是 PROCESSING”保证只有一个结果生效，模型调用的费用则付了两次。单实例时，一次超过 20 分钟的生成即使最后成功了也会被作废重来。20 分钟并不是遥不可及：模型客户端读超时是 300 秒，一次结构化调用最坏要请求 8 次。</p>
+<p>也就是说，围栏区分的是“不同的提交”；同一个 taskId 在超时重投后可能有两个 Worker 同时在跑，这时靠“状态必须是 PROCESSING”保证只有一个结果生效，模型调用的费用则付了两次。单实例时，一次超过 20 分钟的生成即使最后成功了也会被作废重来。20 分钟并不是遥不可及：模型客户端读超时是 300 秒，OpenAI Java SDK 对超时还会自行重试 2 次，服务端挂起时一次结构化调用要 2 × 3 × 300 秒 = 30 分钟才失败（见 <a href="architecture.html#exception-handler">架构 · 全局异常处理</a> 的实测）。</p>
 <h3 id="sm-mechanics">几个关键机制</h3>
 <ul>
   <li><strong>围栏令牌</strong>：每次提交生成一个 UUID 作为 taskId，存到知识库行上，消息里也带着它。所有迁移方法都要求“传入的 taskId 等于当前 taskId，且状态等于预期状态”，否则返回 false 什么都不做。</li>
@@ -609,7 +609,7 @@ end
   <table>
     <thead><tr><th>位置</th><th>数值</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td>大模型 HTTP 客户端</td><td class="num">连接 10s · 读取 300s</td><td>给长输出留足时间</td></tr>
+      <tr><td>大模型 HTTP 客户端</td><td class="num">连接 10s · 读取 300s</td><td>给长输出留足时间；OpenAI Java SDK 对 429 / 5xx / 超时默认再重试 2 次，没有被关闭</td></tr>
       <tr><td>Nginx 反代</td><td class="num">300s</td><td>与后端读超时对齐</td></tr>
       <tr><td>前端 Axios</td><td class="num">60s · 上传 300s</td><td>普通请求与上传分开</td></tr>
       <tr><td>对象存储</td><td class="num">单次 20s · 总计 60s</td><td>S3 SDK 的 attempt / call 超时</td></tr>
