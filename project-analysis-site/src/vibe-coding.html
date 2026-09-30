@@ -1,0 +1,386 @@
+<header class="page-head">
+  <p class="eyebrow">AI 编码 · Claude Code 复刻</p>
+  <h1>用 Claude Code 从零构建这个项目：方法、路线与提示词</h1>
+  <p class="lead">InterviewGuide 本身就是在 AI 编码工具的深度参与下写出来的，仓库里留下了大量痕迹。这一页先把这些证据摆出来，再从中提炼出一套可复用的方法：怎么给 Agent 建立项目记忆、一次功能开发的标准回合是什么、按什么顺序分阶段复刻，每个阶段给出可以直接复制的提示词。最后是仓库里真实发生过的“AI 踩坑”案例，以及面试时怎么诚实地谈 AI 辅助开发。</p>
+</header>
+
+<h2 id="evidence">仓库里的 AI 协作证据</h2>
+<p>判断一个项目是不是“AI 写的”，没有意义；有意义的是它怎么和 AI 协作。这个仓库的证据非常完整：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>证据</th><th>在哪里</th><th>说明了什么</th></tr></thead>
+    <tbody>
+      <tr><td>跨工具的规则入口</td><td><code>AGENTS.md</code>、<code>CLAUDE.md</code></td><td><code>AGENTS.md</code> 是给所有 Agent 的共享规则（Codex 直接读它），<code>CLAUDE.md</code> 第一行 <code>@AGENTS.md</code> 把它导入，只补充 Claude Code 专属的加载提示。提交 <span class="sha">f87f435</span> 的说明里写着“新增并同步 AGENTS.md 与 CLAUDE.md，确保 Codex/Claude 规范一致”。</td></tr>
+      <tr><td>按路径生效的细则</td><td><code>.claude/rules/*.md</code></td><td>后端、AI 与异步、前端三份规则，frontmatter 里用 <code>paths</code> 声明适用的文件范围，只在处理匹配文件时加载，避免根目录上下文膨胀。<code>.gitignore</code> 忽略了 <code>.claude/</code> 下的其他内容，只把规则提交进仓库。</td></tr>
+      <tr><td>多个 AI 工具的署名</td><td>提交历史</td><td>4 个提交带 <code>Co-Authored-By: Claude Sonnet 4.6</code>（多模型 Provider 模块、设置页、相关测试、日程弹窗修复），1 个带 Cursor 署名（ChatModel 按 Provider 缓存），还有一个名为 <code>codex/fix-pr44-pr45-regressions</code> 的分支被合并。</td></tr>
+      <tr><td>斜杠命令的痕迹</td><td><span class="sha">f180a27</span></td><td>提交标题是“refactor: /simplify 清理语音面试代码”，用精简代码的命令做重复逻辑提取和冗余注释清理。</td></tr>
+      <tr><td>TDD 证据文档</td><td><code>.claude/tdd/</code>、<code>docs/testing/</code></td><td>6 份文档，统一记录用户旅程、RED 命令与失败证据、GREEN 结果、测试规格表和已知缺口，格式高度一致，是 Agent 按固定流程工作的产物。</td></tr>
+      <tr><td>浏览器自动化的产物</td><td><code>.gitignore</code></td><td>忽略了 <code>.playwright-mcp/</code>、<code>skills-lock.json</code>、<code>/.agents</code>、<code>CLAUDE.local.md</code>，说明开发时用过 Playwright MCP 做浏览器验证，也装过技能包。</td></tr>
+      <tr><td>规则的机械化执行</td><td><code>.githooks/commit-msg</code>、CI</td><td>提交信息格式由 Git 钩子强制（钩子自己还有测试脚本），测试和构建由 GitHub Actions 强制，而不是只写在文字规则里。</td></tr>
+      <tr><td>Agent 式的谨慎</td><td>证据文档正文</td><td>“测试时发现 8080 已有开发进程，因此临时运行在 8081，未停止或修改原有进程”；“临时烟测验证后已删除”；“验收数据已通过业务删除接口精确清理”。这是被要求“不要破坏环境”的 Agent 才会写下的记录。</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>最有代表性的一段历史是 2026 年 8 月 3 日：两个社区 PR（上下文压缩和刷新重复出题修复）合并后出现回归，随后合入的 codex 分支里依次是“复现合并后的面试回归问题”“复现文本面试幂等映射丢失问题”“固化文本面试入口与路由行为”三个测试提交，然后才是“修复面试会话合并回归”；接着又是“复现 TTS 握手失败后阻塞”在前、“避免 TTS 握手失败卡住语音面试”在后。先复现、后修复，每一步一个提交，这就是 Agent 协作下最值得学的节奏。</p>
+
+<h2 id="context">上下文工程：给 Agent 的项目记忆</h2>
+<p>Agent 每次会话都从零开始，它对项目的所有“常识”都来自你写下的文件。这个仓库的组织方式可以直接照搬：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>层</th><th>文件</th><th>放什么</th><th>不放什么</th></tr></thead>
+    <tbody>
+      <tr><td>共享规则</td><td><code>AGENTS.md</code></td><td>技术栈版本、常用命令、目录结构、分层约定、“绝对不要做”清单</td><td>能从代码直接看出来的东西、临时结论</td></tr>
+      <tr><td>工具入口</td><td><code>CLAUDE.md</code></td><td>导入共享规则，列出细则文件的位置，写规则维护原则</td><td>重复一遍共享规则</td></tr>
+      <tr><td>目录细则</td><td><code>.claude/rules/*.md</code></td><td>只对某类文件生效的规则，如 Stream 消费者模板、Prompt 放置位置、前端 API 约定</td><td>全局规则</td></tr>
+      <tr><td>个人偏好</td><td><code>CLAUDE.local.md</code> 或记忆</td><td>个人习惯、本机环境、调试中的临时结论</td><td>任何需要团队共享的东西（这个文件不提交）</td></tr>
+      <tr><td>机械约束</td><td>Git 钩子、CI、测试</td><td>能被程序检查的规则</td><td>—</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>仓库的 <code>CLAUDE.md</code> 里有三条维护原则，值得抄在每个项目里：新增规则前先问“删掉这条后，Agent 是否更容易犯同类错误”；能被测试、格式化、钩子或 CI 强制的规则，不要只写成自然语言；同一条规则反复被忽略时，优先精简规则文件，而不是加粗或加感叹号。</p>
+<p>规则文件也会过期。这个仓库的 AI 与异步细则里还写着“Provider 配置来自 <code>app.ai.providers</code>”“消费者实现 <code>processMessage()</code>”，而代码早已改成 Provider 以数据库为准、模板方法叫 <code>processBusiness</code>。过期的规则会把 Agent 往错误的方向引，所以架构变更的提交里应该同时更新规则。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>AGENTS.md 骨架（照这个结构写你自己的）</span><button type="button" class="copy-btn" data-copy="prompt-agents">复制</button></div>
+  <pre id="prompt-agents"># 项目 Agent 规则
+
+本文件只放长期有效、代码里不容易推断、猜错会影响结果的规则。
+
+## Tech Stack
+- 后端：Spring Boot 4.x / Java 25 / Gradle / Spring AI 2.0
+- 数据：PostgreSQL 16 + pgvector（1024 维，COSINE，HNSW），Flyway 管理表结构，Hibernate 只做 validate
+- 中间件：Redis 7 + Redisson（缓存、分布式锁、Stream、Lua 限流）
+- 前端：React 18 / TypeScript strict / Vite / Tailwind 4，代码在 frontend/
+
+## Commands
+- 后端测试：./gradlew :app:test --no-daemon
+- 前端构建：cd frontend &amp;&amp; pnpm run build
+- 本地依赖：docker compose -f docker-compose.dev.yml up -d
+
+## Architecture
+- Controller -&gt; Service -&gt; Repository；Controller 只做路由、校验（必须加 @Valid）、限流注解和委托
+- 对外统一返回 Result&lt;T&gt;，禁止直接返回 Entity
+- 耗时的大模型任务一律走 Redis Stream 异步模板，事务提交后再投递
+
+## Never Do
+- 不要在事务内调用大模型、对象存储或外部 HTTP
+- 不要同类内部调用 @Transactional 方法
+- 不要用 0 分、空结果之类的“降级”吞掉失败，失败必须能被重试或被用户看见
+- 不要跳过、禁用或删除测试来让 CI 变绿；遇到失败先报告根因
+- 不要删除 Flyway 迁移脚本，不要修改已发布的迁移</pre>
+</div>
+
+<h2 id="workflow">一次功能开发的标准回合</h2>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 210" role="img" aria-label="一次功能开发的标准回合：探索只读理解现状，计划模式出方案并由人确认，先写失败测试，最小实现让测试通过，跑全量测试与构建，失败则回到实现；人工审查差异，方向不对回到计划；最后按规范提交并写证据文档。计划和审查两步是人工确认点。">
+      <defs>
+        <marker id="wf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="wf-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="12" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="72" y="95" text-anchor="middle">探索</text>
+      <text class="dg-s" x="72" y="114" text-anchor="middle">只读理解现状</text>
+      <rect class="dg-box warn" x="148" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="208" y="95" text-anchor="middle">计划</text>
+      <text class="dg-s" x="208" y="114" text-anchor="middle">人确认方案</text>
+      <rect class="dg-box bad" x="284" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="344" y="95" text-anchor="middle">RED</text>
+      <text class="dg-s" x="344" y="114" text-anchor="middle">先写失败测试</text>
+      <rect class="dg-box good" x="420" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="480" y="95" text-anchor="middle">GREEN</text>
+      <text class="dg-s" x="480" y="114" text-anchor="middle">最小实现</text>
+      <rect class="dg-box" x="556" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="616" y="95" text-anchor="middle">回归</text>
+      <text class="dg-s" x="616" y="114" text-anchor="middle">全量测试 + 构建</text>
+      <rect class="dg-box warn" x="692" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="752" y="95" text-anchor="middle">审查</text>
+      <text class="dg-s" x="752" y="114" text-anchor="middle">人看 diff</text>
+      <rect class="dg-box accent" x="828" y="70" width="120" height="60" rx="8"/>
+      <text class="dg-t" x="888" y="95" text-anchor="middle">提交</text>
+      <text class="dg-s" x="888" y="114" text-anchor="middle">规范信息 + 证据</text>
+      <line class="dg-line" x1="132" y1="100" x2="146" y2="100" marker-end="url(#wf-a)"/>
+      <line class="dg-line" x1="268" y1="100" x2="282" y2="100" marker-end="url(#wf-a)"/>
+      <line class="dg-line" x1="404" y1="100" x2="418" y2="100" marker-end="url(#wf-a)"/>
+      <line class="dg-line" x1="540" y1="100" x2="554" y2="100" marker-end="url(#wf-a)"/>
+      <line class="dg-line" x1="676" y1="100" x2="690" y2="100" marker-end="url(#wf-a)"/>
+      <line class="dg-line" x1="812" y1="100" x2="826" y2="100" marker-end="url(#wf-a)"/>
+      <path class="dg-line warn dash" d="M616,130 L616,168 L480,168 L480,132" marker-end="url(#wf-w)"/>
+      <text class="dg-lbl warn" x="548" y="186" text-anchor="middle">有失败：回到实现，不许改测试迁就</text>
+      <path class="dg-line warn dash" d="M752,70 L752,34 L208,34 L208,68" marker-end="url(#wf-w)"/>
+      <text class="dg-lbl warn" x="480" y="28" text-anchor="middle">方向不对：回到计划，而不是在错误方案上打补丁</text>
+    </svg>
+  </div>
+  <figcaption>橙色的两步是人必须亲自把关的地方：计划决定做什么、怎么做，审查决定能不能合入。其余步骤可以放心交给 Agent，但每一步都要有可执行的结果（命令输出、测试结果），而不是“我觉得完成了”。</figcaption>
+</figure>
+<ul>
+  <li><strong>探索</strong>：让 Agent 先只读地梳理相关代码，输出“现状、涉及的文件、潜在风险”，这一步不许改任何文件。大仓库里可以交给只读的探索子代理并行去查。</li>
+  <li><strong>计划</strong>：在计划模式下让它给出方案和测试清单。人要看三件事：有没有碰事务边界、有没有改表结构或删除东西、验收标准是不是可执行。</li>
+  <li><strong>RED</strong>：先提交失败的测试，并在回复里贴出失败的断言，证明测试确实抓住了问题。这一步单独提交，提交号写进证据文档。</li>
+  <li><strong>GREEN</strong>：写最小实现让测试通过，不顺手重构无关代码。</li>
+  <li><strong>回归</strong>：全量后端测试、前端构建，必要时用 Playwright 在浏览器里走一遍，或写一个调用真实服务的临时烟测，验证后删除。</li>
+  <li><strong>审查</strong>：人看 diff，重点看配置文件、测试文件、迁移脚本和删除的代码。任何“跳过测试”“禁用测试”“放宽断言”都要求 Agent 给出根因。</li>
+  <li><strong>提交</strong>：按提交规范写信息，更新证据文档；如果这次改动改变了架构约定，同时更新规则文件。</li>
+</ul>
+
+<h2 id="roadmap">分阶段复刻路线</h2>
+<p>下面的路线按依赖关系排序，每个阶段都能独立演示、独立验收。提示词吸收了原项目踩过的坑（比如直接要求“失败不能降级成 0 分”“控制器必须加 @Valid”），所以照着做出来的会比原项目更稳。使用时把尖括号里的内容换成你的实际情况；每个阶段开始前先让 Claude Code 在计划模式下出方案，你确认后再执行。</p>
+
+<h3 id="phase-0">阶段 0：脚手架与规则</h3>
+<p>目标：一个能跑的空壳，加上从第一天就生效的规则和守门机制。验收：本地依赖一条命令起来，前后端都能启动，CI 绿，提交信息不合规会被拒绝。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 0 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p0">复制</button></div>
+  <pre id="prompt-p0">我们要从零搭建一个 AI 面试训练平台。先只做脚手架，不写任何业务。
+
+要求：
+1. 后端：Gradle 多模块（根项目 + app 模块），Spring Boot 4.x，Java 25，开启虚拟线程；用 libs.versions.toml 管理版本；依赖先加 Web、Validation、Data JPA、Flyway、PostgreSQL、Redisson、Lombok、MapStruct、SpringDoc。
+2. 前端：frontend/ 下用 Vite 创建 React 18 + TypeScript（strict）项目，接入 Tailwind 4 和 React Router；开发服务器把 /api 代理到 8080。
+3. docker-compose.dev.yml：PostgreSQL 16（带 pgvector 扩展）、Redis 7、MinIO，并有一个初始化任务自动建桶。
+4. 在仓库根目录写 AGENTS.md（技术栈、命令、目录结构、分层约定、Never Do 清单），CLAUDE.md 用 @AGENTS.md 导入它。
+5. .githooks/commit-msg：标题必须是 feat|fix|refactor|perf|test|docs|chore|build|ci|revert 加冒号和中文，正文每行以“- ”开头；再写一个脚本测试这个钩子的接受和拒绝场景。
+6. GitHub Actions：后端跑 ./gradlew :app:test，前端用锁定版本的 pnpm 和 --frozen-lockfile 安装后跑 build。
+
+验收：列出启动命令并实际执行，贴出后端健康检查、前端首页、钩子测试脚本的输出。不要编写任何业务代码。</pre>
+</div>
+
+<h3 id="phase-1">阶段 1：通用底座</h3>
+<p>目标：所有模块共用的约定一次到位。验收：一个示例接口能演示成功、业务错误、参数校验错误、未知异常四种返回，且都是 HTTP 200 + 业务码。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 1 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p1">复制</button></div>
+  <pre id="prompt-p1">在 common/ 下实现通用底座，并把约定补充进 AGENTS.md：
+- Result&lt;T&gt;（code、message、data），成功码 200；
+- ErrorCode 枚举按业务域分段（通用、简历、面试、知识库、存储、AI、限流……），BusinessException(ErrorCode, message)；
+- 全局异常处理器：业务异常、参数校验异常、未知异常都返回 HTTP 200 + Result.error，未知异常只返回通用提示并记录完整日志（异常对象作为日志最后一个参数）；
+- TransactionalExecutor：独立 Bean，提供 run(Runnable) 和 call(Supplier) 在事务中执行，用来解决同类调用事务失效；
+- Flyway V1 基线迁移（先只建一张示例表），Hibernate ddl-auto=validate；
+- CORS 配置用 @ConfigurationProperties，不要在 Service 里用 @Value。
+
+先写测试：全局异常处理器四种场景的 WebMvc 测试、TransactionalExecutor 的回滚测试。测试先失败再实现，贴出 RED 和 GREEN 的命令输出。</pre>
+</div>
+
+<h3 id="phase-2">阶段 2：文件处理与简历上传</h3>
+<p>目标：可靠地把各种格式的简历变成干净的文本，并存好原件。验收：用真实的 PDF、DOCX、TXT 样例测试解析；同一文件改名重传能被识别为重复。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 2 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p2">复制</button></div>
+  <pre id="prompt-p2">实现 infrastructure/file 与简历上传（先不做 AI 分析）：
+1. 类型识别用 Tika 按文件内容检测，不信任请求头的 Content-Type；白名单来自配置。
+2. 解析：AutoDetectParser + BodyContentHandler（设置长度上限）；禁用嵌入文档解析；PDF 关闭内嵌图片、按坐标排序文本。
+3. 清洗：去控制字符、图片文件名行、图片链接、file: 路径、分隔线，统一换行，压缩多余空行。解析结果为空时提示“可能是扫描版 PDF”。
+4. 去重：对文件内容算 SHA-256（大文件用流式计算），数据库唯一索引兜底；并发重复上传撞唯一索引时，回查已有记录返回，并删除刚上传的对象，不能留孤儿文件。
+5. 存储：S3 协议客户端，对象键按 resumes/yyyy/MM/dd/{短UUID}_{安全文件名}，中文转拼音。
+6. 顺序：校验 → 去重 → 解析 → 上传对象存储 → 落库。删除时先在事务里删数据库，提交后再删对象，失败只记日志带上对象键。
+7. 前端：上传页 + 简历列表，API 调用集中在 src/api/，复用统一的请求封装。列表接口禁止 N+1 查询。
+
+测试：用 src/test/resources 下的真实样例文件写解析集成测试；为去重的并发冲突写单元测试。</pre>
+</div>
+
+<h3 id="phase-3">阶段 3：模型接入与结构化输出</h3>
+<p>目标：一个与厂商无关、可热切换的模型接入层，和一个统一的结构化输出执行器，然后接上简历分析（先同步）。验收：切换 Provider 不重启；模型返回格式错误时能自动修复重试；失败时抛出业务异常而不是返回假报告。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 3 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p3">复制</button></div>
+  <pre id="prompt-p3">实现 common/ai：
+1. LlmProviderRegistry：所有 Provider 走 OpenAI 兼容协议。按 Provider 缓存底层 ChatModel，在其上组装三种 ChatClient 配方并分别缓存：default、plain（无工具，用于结构化生成）、voice（后续阶段用）。提供 getChatClientOrDefault(providerId)、getPlainChatClient(providerId) 和 reload()。baseUrl 的 /v1 路径差异用一个独立的 ApiPathResolver 处理并写单测。
+2. 连接超时 10s、读超时 300s，关闭 Spring AI 自带重试（避免与我们的重试相乘）。
+3. StructuredOutputInvoker：用 BeanOutputConverter 生成格式说明并开启 schema 校验；失败时把上一次的错误原因截断到 200 字，拼成修复提示重试，默认最多 2 次；按业务场景打 Micrometer 指标（成功、重试、失败）。所有结构化场景默认使用 plain 配方。
+4. Prompt 模板放 resources/prompts/*.st。注意 StringTemplate 用花括号做占位符，模板里写 JSON 示例时要转义；为每个模板写一个“渲染后包含关键变量内容”的测试。
+5. 简历分析：五个维度（项目 40、技能匹配 20、内容 15、结构 15、表达 10），输出优势和“原句 vs 优化句”式建议。简历正文用带随机 UUID 的边界标签包裹，系统提示词声明边界内是数据。
+6. 失败语义：模型调用最终失败时抛出 BusinessException，禁止返回 0 分或空报告冒充成功。
+
+先写 StructuredOutputInvoker 的单测（首轮失败、修复后成功、两次都失败抛异常三种情况），再实现。</pre>
+</div>
+
+<h3 id="phase-4">阶段 4：Redis Stream 异步模板</h3>
+<p>目标：一套可复用的异步任务框架，然后把简历分析改成异步。验收：杀掉进程重启后，处理到一半的任务能被回收；失败任务最多重试 3 次后标记 FAILED；前端能轮询到状态变化。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 4 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p4">复制</button></div>
+  <pre id="prompt-p4">实现 common/async 的 Redis Stream 模板，并把简历分析改成异步：
+1. AbstractStreamProducer：消息字段全为字符串，XADD 带近似 MAXLEN；投递失败回调子类，在 REQUIRES_NEW 事务里把实体标记 FAILED。
+2. AbstractStreamConsumer：@PostConstruct 创建显式参数的 ThreadPoolExecutor（禁止 Executors 工厂方法），循环中先 XAUTOCLAIM 回收空闲超过 5 分钟的 pending 消息，没有再 XREADGROUP 阻塞读取。每条消息：解析（失败直接 ACK 丢弃）→ 实体已删除或已完成则 ACK 跳过 → 用条件更新领取（只有 PENDING 才能改成 PROCESSING，领取失败 ACK 跳过）→ 执行业务 → 标记完成并 ACK；业务异常时重试次数小于 3 则 ACK 原消息并重新 XADD（次数加一），否则标记 FAILED。常量集中在 AsyncTaskStreamConstants。
+3. 投递时机：必须在数据库事务提交之后。在事务中调用时注册 afterCommit 回调；不在事务中则直接投递。
+4. 简历上传改为落库 PENDING 后投递，立即返回；前端在列表存在处理中条目时每 3 秒轮询，全部完成后停止。
+5. 把模板用法写进 .claude/rules/ai-and-async.md，方法名必须与代码一致。
+
+测试：消费者模板的单元测试覆盖解析失败、跳过、领取失败、成功、重试、重试耗尽六条分支；写一个“事务回滚时不投递”的测试。</pre>
+</div>
+
+<h3 id="phase-5">阶段 5：文字模拟面试</h3>
+<p>目标：Skill 驱动出题、答题、异步评估、报告与导出。验收：刷新创建页不会重复出题；题量越界被拒绝；评估某一批失败时报告仍能生成且注明该批未生成。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 5 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p5">复制</button></div>
+  <pre id="prompt-p5">实现文字模拟面试，分三次提交完成（出题、答题与会话、评估与报告），每次都先写测试：
+1. Skill：resources/skills/{id}/SKILL.md（front matter 只有 name、description，正文是面试官人设与出题规则）+ skill.meta.yml（类目、优先级 ALWAYS_ONE/CORE/NORMAL、参考题库文件名）+ _shared/references/*.md。启动时建立索引；参考文件名走白名单校验防目录穿越。
+2. 题量分配：先给 ALWAYS_ONE 各 1 题，再按 CORE、NORMAL 顺序各 1 题，剩余按 CORE 优先轮转；为 6、8、10、12 题写表驱动测试，并覆盖“题量少于类目数”的公平性。
+3. 出题：直接把分配表、人设和命中类目的参考题库注入 Prompt，不使用工具调用（多厂商对工具调用兼容性差）。有简历时简历题 60%、方向题 40% 并行生成、互为降级；每题让模型输出 10 字内的 topicSummary，用最近 10 场同方向面试的摘要去重。
+4. 创建幂等：前端在 URL 中带 requestId（/interview/create/{uuid}），后端对 requestId 加分布式锁，先查 Redis 映射，再查数据库唯一列，都没有才出题；先落库再写缓存；成功后前端 replace 到 /interview/session/{id}。Controller 参数必须加 @Valid，Service 内再夹紧题量。
+5. 会话：题目列表存 JSON，答案表以（会话，题号）唯一；写操作先数据库后 Redis；缓存未命中从数据库恢复。
+6. 评估：统一评估引擎只接受 QaRecord 列表；每批 8 题结构化评估，批次失败该批按 0 分并注明未生成；再做一次汇总，汇总失败退回拼接。未作答 0 分，总分为逐题平均。只提供异步评估，不要保留同步生成报告的接口。
+
+每一步贴出测试命令与结果。</pre>
+</div>
+
+<h3 id="phase-6">阶段 6：知识库与 RAG</h3>
+<p>目标：上传资料、可靠向量化、多轮流式问答。验收：向量化中途失败时旧数据可用；检索无结果不调模型；用户中途关闭页面后，消息状态被正确收尾。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 6 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p6">复制</button></div>
+  <pre id="prompt-p6">实现知识库与 RAG 问答：
+1. 向量化（异步管线）：TokenTextSplitter 分块（加 10%–15% 重叠），每批 10 块调用 Embedding。采用影子写入：新块的 kb_id 写成 pending:{kbId}:{jobId} 并带 job_id 元数据；全部成功后在一个事务里删除 kb_id={kbId} 的旧向量并用 jsonb_set 提升新向量；失败按 job_id 清理。为 metadata-&gt;&gt;'kb_id' 和 job_id 建表达式索引（新迁移）。
+2. 检索：先结合最近历史做查询改写（失败用原问题），候选为“改写版、原问题”；按去空白后的长度选 topK 和阈值，所有阈值只在 @ConfigurationProperties 类里定义默认值，yml 不重复写默认值；带 kb_id 过滤检索，过滤出错时退化为扩大召回后内存过滤。
+3. 生成：无命中直接返回固定文案不调模型；有命中流式生成。让模型在资料不足时输出一个明确的结构化标记，而不是靠关键词判断拒答。
+4. 会话：先在一个事务里保存用户消息和助手占位消息，再开始流式；用 doFinally 按信号类型收尾（完成、出错、取消都要写入内容和状态）。
+5. 前端：用 fetch + ReadableStream 实现 SSE 客户端（支持 POST），换行在服务端转义、前端还原；渲染用 requestAnimationFrame 合并；接入 AbortController 提供“停止生成”。
+6. 删除知识库：一个事务里删除问答会话关联、题目（后续阶段会有）和知识库记录，提交后再删向量和对象。
+
+测试：影子写入的成功、失败、并发两个任务三种场景；流式取消时消息被收尾的测试。</pre>
+</div>
+
+<h3 id="phase-7">阶段 7：题库与题库面试</h3>
+<p>目标：从资料生成可维护的题库，并按容量严格抽题。验收：并发提交、旧 Worker、消费失败、进程重启四种场景都有测试；重新生成不影响已启用的题。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 7 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p7">复制</button></div>
+  <pre id="prompt-p7">实现知识库题库生成与题库面试。先写复现测试，再实现：
+1. 状态机：知识库行上保存 question_gen_status（NONE/QUEUED/PROCESSING/COMPLETED/FAILED）、task_id、参数快照。每次提交生成新 taskId；所有迁移在 SELECT ... FOR UPDATE 内比较 taskId 与预期状态，不匹配返回 false。有活动任务时拒绝重复提交。
+2. 生成：模型调用与实体构建在事务外；最后一个短事务再次核对 taskId 与 PROCESSING，然后只替换 DRAFT 状态的题目（保留 ACTIVE、ARCHIVED 和手工新增的题），写入完成状态和“生成 X 道、跳过 Y 道重复”的消息。失败信息对外脱敏。
+3. 恢复：每分钟扫描，QUEUED 超过 2 分钟重投，PROCESSING 超过 20 分钟复位。
+4. 上下文：用 4 个探针查询（概念、流程、边界、案例）各取若干片段，去重后截断到 5000 字；Prompt 带已有方向和最近题目。
+5. 题库维护：DRAFT → ACTIVE → ARCHIVED，支持编辑与手工新增。
+6. 容量接口：给定方向、难度、主问题数，返回追问数 0–5 各自可满足的启用题数量；开始面试时严格满足，否则返回说明缺什么的错误。抽题用洗牌，追问用局部 Fisher–Yates。会话复用文字面试，评估时优先使用题目自带的参考答案和评分规则。
+7. 前端：提交后跳到题库页每 3 秒轮询，只有同一任务从活动态变为 COMPLETED 才刷新列表；重新生成前二次确认。
+
+测试必须包括：旧 Worker 结果被丢弃、首次失败回到 QUEUED、重试耗尽 FAILED、超时恢复、替换与完成同一事务、重新生成保留已启用题、删除有题库的知识库成功。</pre>
+</div>
+
+<h3 id="phase-8">阶段 8：实时语音面试</h3>
+<p>目标：低时延、无回声、可恢复的语音对话。验收：用假 WebSocket 和虚拟麦克风的端到端测试覆盖“字幕 → 提交 → 追问 → 迟到字幕不串轮”；断线 60 秒内重连会话不结束。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 8 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p8">复制</button></div>
+  <pre id="prompt-p8">实现语音面试。云端服务用 DashScope Qwen3 实时 ASR 与 TTS（WebSocket SDK），分四次提交：
+1. 浏览器采集：AudioWorklet 重采样到 16kHz、Float32 转 Int16，200ms 一帧 Base64 发送；采集开启回声消除；处理链末端接增益 0 的节点。不引入前端 VAD。
+2. 后端会话：WebSocket 处理器按会话维持一条 ASR 连接，就绪后发 asr_ready；部分结果（text + stash）与最终段合并成可编辑字幕；用户手动提交（可携带修改后的文本）才触发模型。ASR 断线重连时，关闭回调必须按对象身份判断，只移除自己那条连接；同一会话的启停加锁。
+3. 生成与合成：模型流式输出、按句切分，每句提交 TTS（并发上限 3），有序发射器按序号下发 audio_chunk；截断回复长度的逻辑放在句子分发之前，保证念出来的与记录一致。TTS 建连必须有超时（握手失败不能阻塞），单句超时后跳过。模型失败时发送 error 消息，不要把错误提示当作面试官发言念出或落库。
+4. 防护与生命周期：前端在提交后到本地播完之前不发音频，后端在生成与播放窗口加 800ms 冷却期丢弃音频，并丢弃迟到的识别结果。断线后给 60 秒宽限期再结束会话并投递评估（事务提交后投递）；5 分钟无活动暂停；每分钟清理超时会话与卡住的评估。WebSocket 地址由配置生成，Nginx 配置 /ws 的 Upgrade 代理。
+5. 自定义 JD 方向时，把 JD 和解析出的类目注入系统提示词。
+6. 指标：首 token 时延、首句音频下发时延、合成耗时、整轮耗时。
+
+测试：TTS 握手失败不阻塞的回归测试；ASR 旧连接关闭回调不影响新连接的测试；Playwright 注入假 WebSocket 与假麦克风的端到端测试。</pre>
+</div>
+
+<h3 id="phase-9">阶段 9：设置、限流、日程与收尾</h3>
+<p>目标：补齐多模型管理、安全与运维能力。验收：没有登录无法访问设置接口；伪造请求头无法绕过限流；CI 包含容器级启动测试和端到端测试。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>阶段 9 提示词</span><button type="button" class="copy-btn" data-copy="prompt-p9">复制</button></div>
+  <pre id="prompt-p9">收尾阶段，逐项完成并各自提交：
+1. Provider 管理：配置存数据库，YAML 只做首次种子（在 ApplicationReadyEvent 中执行事务方法，不要在 @PostConstruct 上加 @Transactional）；API Key 用 AES-GCM 加密（随机 12 字节 nonce），主密钥来自环境变量并带版本号以支持轮换；保存与调用前都校验 baseUrl 的协议和解析后的地址（拒绝内网与链路本地地址，回环地址需显式开启）；写操作先加锁再进入事务，reload 放在 afterCommit 回调。
+2. 限流：可重复的 @RateLimit 注解，Lua 脚本两阶段（先只读校验所有维度，全部通过再扣减），键使用 hash tag；IP 只信任网关写入的头；用户维度从认证上下文取。用 Testcontainers 的 Redis 写多维回滚测试。
+3. 鉴权：接入 Spring Security，至少保护设置和删除类接口；所有业务数据带 userId。
+4. 日程：邀约解析规则优先、模型兜底；正则用捕获组；过期未完成的日程标记为“待确认”而不是“已取消”。
+5. CI：增加用 Testcontainers（PostgreSQL + pgvector、Redis）的应用启动与 Flyway 迁移测试，加入全部前端单测与 Playwright 端到端测试。
+6. 清理：删除没有代码读取的配置项，更新 AGENTS.md 与 .claude/rules 使其与代码一致。
+
+每项完成后运行全量测试与构建，贴出结果。</pre>
+</div>
+
+<h2 id="tdd-template">两个通用模板：修 bug 与写证据</h2>
+<div class="prompt">
+  <div class="prompt-head"><span>修 bug 提示词模板</span><button type="button" class="copy-btn" data-copy="prompt-bugfix">复制</button></div>
+  <pre id="prompt-bugfix">问题：&lt;用户视角的现象，附日志或截图说明&gt;
+
+请按以下步骤处理，每一步完成后停下来给我看结果：
+1. 只读排查：定位相关代码，给出根因假设和证据（代码位置、日志行），不要修改文件。
+2. RED：写一个能稳定复现的测试，运行并贴出失败的断言。单独提交，信息格式“test: 复现……”。
+3. GREEN：最小修改让测试通过，不重构无关代码。
+4. 回归：运行 ./gradlew :app:test --no-daemon 和 cd frontend &amp;&amp; pnpm run build，贴出结果。
+5. 如果任何既有测试失败，报告失败原因，不允许跳过、禁用测试或放宽断言。
+6. 写 docs/testing/&lt;主题&gt;.tdd.md：用户旅程、RED/GREEN 命令与结果、测试规格表、已知缺口、提交号。</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>代码审查提示词模板</span><button type="button" class="copy-btn" data-copy="prompt-review">复制</button></div>
+  <pre id="prompt-review">请以资深后端审查者的身份审查 &lt;分支 / 模块&gt; 的改动，只输出问题清单，不要修改代码。
+重点检查：
+- 事务边界：事务内是否调用了模型、对象存储、外部 HTTP；是否存在同类调用 @Transactional、在 @PostConstruct 上加事务、在事务内加锁的情况；
+- 失败语义：是否有把失败降级成“看起来成功”的结果（0 分、空列表、固定文案）而导致重试和告警失效；
+- 并发与幂等：消息重复消费、状态迁移是否是比较后更新、唯一约束是否兜底；
+- 接口：请求体是否 @Valid、是否直接返回 Entity、错误信息是否泄露内部异常；
+- 数据：外键与删除顺序、迁移脚本是否可重复执行；
+- 测试：是否有被跳过或禁用的测试，配置文件是否能被正确解析。
+每个问题给出：文件与行号、触发条件、影响、修复建议、需要补的测试。按严重程度排序。</pre>
+</div>
+
+<h2 id="tooling">Claude Code 的哪些能力用在哪</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>能力</th><th>在这个项目里的用法</th></tr></thead>
+    <tbody>
+      <tr><td>项目记忆（CLAUDE.md 与导入）</td><td>用 <code>@AGENTS.md</code> 导入跨工具规则，Claude Code、Codex、Cursor 共用一份约定。</td></tr>
+      <tr><td>按路径的规则</td><td>后端、异步与 AI、前端三份细则只在处理对应文件时加载。</td></tr>
+      <tr><td>计划模式</td><td>每个阶段、每个跨模块改动先出方案再动手，人确认事务边界和表结构变更。</td></tr>
+      <tr><td>子代理</td><td>只读的探索子代理并行梳理大模块；单独的审查子代理按上面的审查模板找问题；测试子代理负责跑全量测试并汇总失败。</td></tr>
+      <tr><td>Hooks</td><td>编辑 Java 文件后自动编译、编辑前端文件后自动类型检查；禁止读写 <code>.env</code>；拦截对 <code>db/migration</code> 下已发布脚本的修改。和 Git 钩子、CI 一起构成“机械约束”。</td></tr>
+      <tr><td>Skills</td><td>把重复的流程做成技能，例如“新增一条 Stream 管线”“写 TDD 证据文档”。有意思的是，这个项目的面试方向本身也用了 SKILL.md 格式。</td></tr>
+      <tr><td>MCP</td><td>Playwright MCP 在浏览器里验收页面和语音流程（仓库忽略了它的输出目录）；GitHub MCP 管理 PR；也可以接数据库只读查询来核对迁移结果。</td></tr>
+      <tr><td>检查点与回退</td><td>Agent 在错误方向上走远时直接回退到计划阶段，而不是在错误方案上继续打补丁。</td></tr>
+      <tr><td>无头模式与 CI 集成</td><td>在 PR 上自动运行审查提示词，把结果作为评论，让人把精力放在判断而不是找问题上。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="pitfalls">真实踩坑：仓库里能找到的典型问题</h2>
+<p>下面每一条都有提交或代码作为证据。第一条所在的提交明确带有 AI 协作者署名，其余几条无法从记录上确定是否由 AI 生成，但都是 AI 编码中最常见的问题类型。列出它们不是为了否定 AI 编码，而是说明哪些地方必须由人把关。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>现象</th><th>证据</th><th>教训与防护</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>改配置改坏了缩进，又把失败的测试禁用了</td>
+        <td><span class="sha">6b14836</span>（带 AI 协作者署名）把测试配置里的模型名替换时丢了缩进，文件从此不是合法 YAML；同一提交给唯一的容器级集成测试加上 <code>@Disabled</code>，理由写的是“配置漂移导致 NPE”。</td>
+        <td>禁止 Agent 跳过或禁用测试来换取通过；审查时重点看配置和测试文件；CI 加一步配置文件解析检查和真正的启动测试。</td>
+      </tr>
+      <tr>
+        <td>先上了“更 Agent”的方案，又退了回来</td>
+        <td><span class="sha">884855d</span> 引入工具调用按需加载 Skill，<span class="sha">2b4a72f</span>、<span class="sha">5793f36</span> 陆续打补丁，<span class="sha">d0e7c41</span> 最终改回直接注入，原因是多厂商对工具调用的兼容性不一致。</td>
+        <td>架构级的选择先做小规模验证（在所有目标 Provider 上跑通），再大面积铺开。</td>
+      </tr>
+      <tr>
+        <td>“清理遗留代码”删掉了迁移脚本</td>
+        <td><span class="sha">5c878a3</span> 的说明里有“删除 Flyway 迁移脚本”，之后表结构靠 Hibernate 自动更新维持了三个多月，直到 <span class="sha">f42f750</span> 才以 V1 基线的形式把迁移加回来。</td>
+        <td>在规则里列出“永不删除”的目录；审查时单独看被删除的文件。</td>
+      </tr>
+      <tr>
+        <td>改了一处默认值，另一处没改</td>
+        <td><span class="sha">1bf8f1b</span> 说明“minScoreShort 提高到 0.25”，只改了 Java 默认值，yml 里仍是 0.18 且优先生效。</td>
+        <td>默认值只在一处定义；让 Agent 修改参数时先全仓搜索所有出现位置并列出来。</td>
+      </tr>
+      <tr>
+        <td>优雅降级吞掉了失败</td>
+        <td>简历分析失败返回 0 分报告；语音模型失败把错误提示当成面试官的话念出来并存档。</td>
+        <td>在验收标准里明确写失败语义：“失败必须能被重试或被用户看到”。</td>
+      </tr>
+      <tr>
+        <td>看起来对，其实没接上</td>
+        <td>请求体上的校验注解因为缺 <code>@Valid</code> 不生效；语音的阶段切换逻辑和测试都写了，生产代码里却没有调用；自动提交、语音限流的配置项留在 yml 里没人读。</td>
+        <td>测试要从入口测（控制器层、端到端），而不只是测一个孤立的方法；定期让 Agent 做“死代码与死配置”扫描并给出证据。</td>
+      </tr>
+      <tr>
+        <td>规则与代码漂移</td>
+        <td>规则文件仍描述 YAML 来源的 Provider 和不存在的 <code>processMessage()</code>。</td>
+        <td>规则是代码的一部分，架构变更的 PR 必须同时更新规则。</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="human">哪些事不能交给 Agent</h2>
+<ul>
+  <li><strong>定义问题和验收标准</strong>：“刷新不重复出题”“失败不能伪装成功”这样的标准必须由人写清楚，Agent 才有目标可以验证。</li>
+  <li><strong>架构取舍</strong>：单体还是拆分、pgvector 还是专用向量库、要不要工具调用，这些决定影响整个项目，Agent 可以列选项，由人拍板。</li>
+  <li><strong>破坏性操作</strong>：删表、改迁移、删文件、改密钥、推送到共享分支。</li>
+  <li><strong>决定跳过测试</strong>：任何让测试不再运行的改动，都要人确认根因。</li>
+  <li><strong>真实环境验证</strong>：调用真实的云服务、在真实浏览器里走流程，由人决定何时做、做完是否删掉临时代码。</li>
+  <li><strong>优先级</strong>：审查清单里 18 条问题先修哪几条，取决于业务，而不是取决于哪条最容易修。</li>
+</ul>
+
+<h2 id="talk">面试时怎么谈 AI 辅助开发</h2>
+<p>现在很多面试官会主动问“你用 AI 写代码吗”。回避或者夸大都不好，比较稳的回答结构是：用了什么、怎么用、我负责什么、我怎么保证质量、踩过什么坑。</p>
+<div class="callout pitch">
+  <span class="label">参考回答</span>
+  <p>我用 Claude Code 做了大量编码工作，但方式比较克制。我先把项目约定写进 AGENTS.md 和按目录生效的规则文件，让它每次都在同样的约束下工作；每个改动都先在计划模式下出方案，我确认事务边界和数据变更后再执行；修 bug 时要求它先写能复现的失败测试，再写修复，最后跑全量测试，所有结论都要有命令输出作证据。我的精力主要花在定义问题、做架构决策和审查 diff 上。我也见过它出错：比如改配置时弄坏了 YAML 缩进，还顺手把失败的集成测试禁用了，理由写得很像回事。所以我给自己定了一条规矩，凡是跳过测试、修改迁移、删除文件的改动，都必须由我亲自确认。</p>
+</div>
+<p>三个要避免的说法：“基本都是 AI 写的，我负责提需求”（显得没有工程判断）；“我没用过 AI 工具”（在这个项目上不可信）；“AI 写的代码没有问题”（说明没有认真审查过）。</p>

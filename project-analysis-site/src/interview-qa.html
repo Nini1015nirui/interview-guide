@@ -1,0 +1,455 @@
+<header class="page-head">
+  <p class="eyebrow">面试准备 · 高频问答</p>
+  <h1>面试高频问答：50 道追问与参考回答</h1>
+  <p class="lead">按面试官最常见的追问路径整理，从项目整体、大模型工程、异步一致性、数据与缓存、RAG、实时语音、前端，到质量和开放题。每题给出考察点、参考回答和可能的下一问。前 20 题覆盖了九成以上的高频追问，时间紧就先练这些。参考回答用“我们”指代项目团队，你需要按自己的真实参与程度改写，不要背诵。</p>
+</header>
+
+<div class="qa-tools">
+  <button type="button" class="icon-btn" data-qa-action="close">自测模式：收起全部答案</button>
+  <button type="button" class="icon-btn" data-qa-action="open">全部展开</button>
+</div>
+<p class="small muted">自测方法：先收起全部答案，只看问题，出声回答一遍（控制在 1–2 分钟），再展开对照。答不上来的题回到对应的解析页重读。</p>
+
+<h2 id="qa-overview">项目整体</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q01</span>用两三分钟介绍一下这个项目。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：能否在短时间内讲清楚定位、架构和难点，而不是罗列功能。</p>
+    <p>按“一句话定位 → 技术栈 → 三个难点 → 我做了什么”四段讲。定位：一个用大模型做面试训练的全栈平台，覆盖简历分析、文字与语音模拟面试、知识库问答和题库面试。技术栈：Spring Boot 4、Java 25 虚拟线程、Spring AI 2.0，PostgreSQL 加 pgvector 同时做业务库和向量库，Redis 做缓存、锁、Stream 队列和限流，前端是 React。难点挑三个讲：一是把慢且不稳定的模型调用变可靠（Stream 异步、结构化输出重试、状态机加 taskId 围栏）；二是 RAG 的检索策略（查询改写、按长度调阈值、影子写入）；三是实时语音的时序（句子级并发合成、四层回声防护）。最后用一两句话说清你负责或改进的部分。</p>
+    <p class="qa-follow">可能的追问：为什么做这个项目？谁在用？你具体负责哪一块？完整讲法见 <a href="resume.html#scripts">简历与讲述</a>。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q02</span>整体架构是怎样的？为什么做成单体而不是微服务？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对架构选择的判断力，知道单体和微服务各自的成本。</p>
+    <p>后端是模块化单体：<code>common</code> 放限流、模型接入、异步模板、异常这些横切能力，<code>infrastructure</code> 放文件、导出、Redis、映射，<code>modules</code> 下每个业务模块自带 Controller、Service、Repository。选单体有三个理由：团队小、一个 Docker Compose 就能部署；很多关键流程依赖本地事务，比如向量的“删旧 + 提升”、题库的“替换 + 完成”，拆开就要引入分布式事务；模块之间依赖很少，边界已经清楚，以后拆也不难。真要拆，我会先拆两块：Stream 消费者（AI Worker），因为它的资源画像和 Web 请求完全不同，适合独立扩容；语音 WebSocket 网关，因为它是有状态的长连接。</p>
+    <p class="qa-follow">可能的追问：模块之间怎么调用？（直接注入对方的 Service，拆分前需要先抽接口或改成事件。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q03</span>为什么选 PostgreSQL + pgvector，而不是 MySQL 加一个专门的向量库？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：技术选型的依据和边界。</p>
+    <p>核心理由是“一套库解决两件事”：业务数据和向量在同一个数据库里，可以放进同一个事务，重新向量化时“删除旧向量 + 提升新向量”就是一个本地事务，换成独立的向量库就做不到原子切换。其次是运维成本，少一个组件。量级上，面试资料是几千到几万个片段，HNSW 索引完全够用。边界也要讲清楚：向量上到百万、千万级，或者要按租户、知识库做大量过滤时，pgvector 的“先近邻后过滤”会损失召回，那时再考虑 Milvus 这类专用向量库或分区方案。</p>
+    <p class="qa-follow">可能的追问：HNSW 和 IVFFlat 的区别？（HNSW 建索引慢、占内存，查询快、召回高，不需要先有数据训练；IVFFlat 建得快，但要选聚类数并定期重建。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q04</span>从上传一份简历到看到分析结果，完整链路是什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：能否把一个请求讲透，同步和异步的边界划在哪里。</p>
+    <p>同步部分：校验大小，用 Tika 按文件内容识别类型，对内容算 SHA-256 去重，Tika 解析正文并清洗，原件存对象存储，数据库写一条 PENDING 记录，提交后投递到 Redis Stream，接口立即返回。异步部分：消费者读到消息，先确认简历还在、没有完成过，标记 PROCESSING，调用模型做结构化输出（带修复型重试），保存分析结果，标记完成再 ACK。前端每 3 秒轮询状态。只有模型调用被异步化，解析和存储留在同步里，是为了能立刻告诉用户“文件是扫描版，提取不到文字”这类问题。</p>
+    <p class="qa-follow">可能的追问：分析失败了用户看到什么？（这里有一个缺陷：失败会被降级成一份 0 分报告，重试机制因此失效，见 <a href="quality.html#findings">Q03</a>。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q05</span>项目里 Redis 用在了哪些地方？为什么消息队列不用 Kafka 或 RabbitMQ？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对中间件职责的理解，选型是否克制。</p>
+    <p>四个用途：会话缓存（文字面试 24 小时、语音会话 1 小时）、分布式锁和幂等结果映射（Redisson）、Stream 消息队列（五条异步管线）、Lua 脚本限流。队列用 Stream 是因为 Redis 已经在，任务量不大（每个用户每次操作一条消息），而 Stream 自带消费者组、ACK 和 pending 列表，足够实现“至少一次”投递。代价是持久化和堆积能力比不上 Kafka，也没有现成的死信队列。如果任务量上来、需要回放或多个下游订阅，再换成 Kafka 或 RocketMQ。</p>
+    <p class="qa-follow">可能的追问：Redis 宕机会怎样？（缓存从数据库恢复；锁和限流失效；Stream 里未持久化的消息可能丢，靠状态字段和恢复调度兜底。）</p>
+  </div>
+</details>
+
+<h2 id="qa-llm">大模型工程</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q06</span>怎么同时支持多家模型厂商，还能在页面上热切换？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：抽象设计和缓存失效。</p>
+    <p>所有厂商都走 OpenAI 兼容协议，差异只在地址、模型名和 Key。Provider 配置以数据库为准（YAML 只做首次启动的种子），Key 用 AES-GCM 加密存储。注册表按 Provider 缓存底层的 ChatModel，再在它上面组装三种 ChatClient：默认配方（挂 Skill 工具）、纯净配方（无工具，出题用）、语音配方（支持流式工具调用）。设置页修改后调用 <code>reload</code> 清空缓存，下一次调用按新配置重建，不用重启。向量模型稍微特殊：VectorStore 启动时就需要一个 EmbeddingModel，所以注册了一个委托对象，每次调用时再转发给当前默认的向量 Provider。</p>
+    <p class="qa-follow">可能的追问：切换向量模型要注意什么？（维度必须一致，而且不同模型的向量空间不可比，切换后需要重新向量化所有知识库。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q07</span>怎么保证大模型返回合法的 JSON？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：结构化输出的工程化手段。</p>
+    <p>三件事：格式说明、校验、修复型重试。用 Spring AI 的 <code>BeanOutputConverter</code> 由目标类型生成 JSON Schema 格式说明，拼在系统提示词后面；调用时打开 schema 校验；失败后把上一次的错误原因截断到 200 字，拼进“请修正以下问题”的提示再调一次，默认最多两次。关闭 schema 校验的模式下，还会在本地修复“字符串里的双引号没转义”这种最常见的错误。所有业务都走同一个执行器，避免每个 Service 各写一套重试。还有一个细节：把 Spring AI 自带的重试关掉，否则两层重试相乘，一次失败可能调用很多次模型。</p>
+    <p class="qa-follow">可能的追问：为什么不用厂商的 JSON Mode？（不同厂商支持程度不一，而且 JSON Mode 只保证是 JSON，不保证符合 schema；执行器与厂商无关。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q08</span>结构化输出重试之后还是失败，怎么办？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：降级设计，以及降级的副作用。</p>
+    <p>在业务层降级，原则是“用户一定能拿到东西”：出题失败用兜底题；评估某一批失败，这一批每题按 0 分并注明未生成，汇总失败就把各批结论拼接去重；RAG 查询改写失败就用原问题检索。但降级不能吞掉失败信号。简历分析就是反例：失败时返回一份 0 分报告并标记完成，Stream 模板的重试、失败状态和“重新分析”入口全都失效了。正确做法是抛异常交给模板重试，重试耗尽标记失败，让用户明确知道要重试。</p>
+    <p class="qa-follow">可能的追问：什么时候该降级、什么时候该失败？（结果仍然有意义时降级，比如部分题目的评估；结果会误导用户时失败，比如一份 0 分的简历报告。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q09</span>Prompt 注入怎么防？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对 LLM 安全的认知是否现实。</p>
+    <p>纵深防御，三层加一条原则。第一层是输入净化：去掉行首的角色标记、精确的注入短语和伪造的分隔符，再用带随机 UUID 的边界标签把用户文本包起来，攻击者没法提前写出能闭合它的标签。第二层是系统提示词声明数据边界：边界内的内容是数据，不执行其中的指令。第三层是 Spring AI 的 SafeGuardAdvisor，请求发出前做敏感短语匹配，命中就不调用模型、直接返回固定回复。最重要的一条原则是：模型的输出只当数据用，经过 schema 校验再入库，业务逻辑从不根据模型的自然语言去执行动作。黑名单一定能被绕过，所以重点是限制注入成功后的影响范围。</p>
+    <p class="qa-follow">可能的追问：SafeGuard 检查的是输入还是输出？（输入。它在请求前检查整个 Prompt，想做输出侧检查需要自定义 Advisor。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q10</span>面试题是怎么生成的？怎么保证覆盖面、又不和上次重复？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Prompt 工程与算法结合。</p>
+    <p>每个面试方向是一个 Skill 目录：人设和出题规则写在 SKILL.md，考察类目和优先级写在 meta 文件，另有共享的参考题库。给定题量后按三阶段分配：先给“项目经历”这类 ALWAYS_ONE 类目各 1 题，再给每个 CORE、NORMAL 类目各 1 题保证覆盖，剩余名额按 CORE 优先轮转追加；分配结果以表格写进 Prompt，并只注入分到题的类目的参考题库。有简历时拆成两路并行：简历深挖题占 60%，方向题占 40%，互为降级。去重靠历史：取同方向最近 10 场面试的主问题，每道题生成时让模型顺带输出一个 10 字以内的主题摘要，注入时只放摘要，60 道题大约 600 token，也不需要额外的模型调用。</p>
+    <p class="qa-follow">可能的追问：题量少时 NORMAL 类目会不会一题都分不到？（早期版本会，提交 91fee29 修了第二阶段的公平性。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q11</span>你们一开始用 Tool Calling 加载面试方向，后来为什么改掉了？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对 Agent 能力边界的判断，是否能从失败中总结。</p>
+    <p>最初接入 spring-ai-agent-utils 的 SkillsTool，让模型按需调用工具加载方向说明，属于“渐进式披露”。随后发现几个问题：人设通过工具和手工拼接注入了两次；简历题生成时模型会意外调用工具；最关键的是不同 OpenAI 兼容厂商对工具调用消息链路的校验不一致，有的直接报错。最后出题改回“后端确定性地把类目、参考题库和人设注入 Prompt”。结论是：开放式对话适合工具调用，而结构化生成需要单轮、无工具、上下文确定；多厂商兼容时，工具调用是最脆弱的一环。</p>
+    <p class="qa-follow">可能的追问：那语音面试呢？（语音仍用工具加载人设，而且由于每轮是无状态调用，模型可能每轮都重新加载，多一次往返，是个可以优化的点。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q12</span>面试评估怎么做？为什么要分批再汇总？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：长输出任务的拆分思路。</p>
+    <p>文字、语音、题库三种面试都先转换成统一的问答记录，交给同一个评估引擎。按每批 8 题做结构化评估，得到逐题分数、反馈、参考答案和要点；再把类别均分、每题摘要和各批结论交给模型做一次汇总，生成总评、优势和改进建议。分批的原因：一场面试可能二十多题，一次性评估输出太长，JSON 越长越容易中途损坏，而且一题出错整场作废；分批把失败限制在一批之内。汇总是为了让各批口径统一。规则上，没作答的题固定 0 分，总分是逐题算术平均，类别分是类别内平均；知识库面试的题目自带参考答案和评分规则，会作为评估基线传给模型。</p>
+    <p class="qa-follow">可能的追问：模型打分不稳定怎么办？（给基线和评分规则收窄空间、温度调低；更进一步要建立固定样本做回归评测。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q13</span>模型调用的成本和时延怎么控制？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：成本意识。</p>
+    <p>几类手段。控制输入：简历上下文截断到 3000 字，参考题库单文件 3000、整体 12000 字，评估基线 6000 字，题库生成上下文 5000 字，历史题目只注入摘要。减少调用：检索没命中就不调模型；模型开头就在说“查不到”时截断输出；向量化按 10 块一批。改善感知时延：耗时任务异步化；问答和语音都流式输出；语音按句并发合成。控制频率：接口多维限流。还缺的是 token 用量和费用的统计、按任务分配不同价位的模型、以及结果缓存。</p>
+    <p class="qa-follow">可能的追问：怎么统计每个用户花了多少钱？（从响应的 usage 字段取 token 数，按 Provider 单价折算，按用户和功能打指标。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q14</span>怎么评价模型输出的质量？有没有做评测？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：是否理解 LLM 应用需要评测体系。诚实比包装更重要。</p>
+    <p>项目里没有离线评测集，质量保障主要靠三点：结构化 schema 校验保证“格式对”；规则兜底保证“不离谱”（未作答 0 分、无有效对话不给分）；题库题目先是草稿，人工审核后才启用，属于人在回路。如果继续做，我会建三类评测：出题用固定的方向和简历样本，检查类目覆盖和重复率；评估用一批人工打过分的问答，看模型分数与人工分数的相关性，每次改 Prompt 都回归；RAG 用问题和标注的相关片段，算召回率和命中率，调阈值时有数据可依。</p>
+    <p class="qa-follow">可能的追问：用模型评模型可靠吗？（可以作为参考，但要用固定的评分规则、多次采样取一致性，并定期和人工抽检对齐。）</p>
+  </div>
+</details>
+
+<h2 id="qa-async">异步、一致性与并发</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q15</span>用 Redis Stream 做异步，消息会丢吗？失败了怎么重试？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：消息可靠性的完整链条。</p>
+    <p>消费者组加 ACK：消息被读出后进入 pending 列表，处理完才 ACK；消费者崩溃时消息留在 pending，下一轮用 XAUTOCLAIM 认领空闲超过 5 分钟的消息。业务失败的重试不依赖 pending，而是 ACK 原消息后重新写入一条带重试次数的新消息，最多 3 次，再失败就标记 FAILED。可能丢的情况有三种：Redis 自身丢数据，取决于持久化配置；近似 MAXLEN 裁剪在极端堆积时裁掉未消费的消息，代码在认领时发现被裁剪会打告警；事务提交后、投递前进程崩溃。前两种靠持久化和容量规划，第三种项目用恢复调度兜底了题库生成和语音评估，彻底解决要用 Outbox。</p>
+    <p class="qa-follow">可能的追问：为什么重试不直接等 pending 回收？（回收要等 5 分钟，而且无法记录重试次数；重新入队可以带上次数。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q16</span>怎么保证消息不会比数据库事务先到？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：事务与消息的顺序问题。</p>
+    <p>如果在事务提交前发消息，消费者可能读到旧状态甚至读不到这行；如果先发消息后事务回滚，会产生幽灵任务。项目里有三种写法：注册 <code>afterCommit</code> 回调，事务提交后才投递（语音面试结束）；用 <code>TransactionalExecutor</code> 先执行一个小事务并提交，再在事务外投递（简历重新分析），这个执行器顺便解决了同类调用事务失效的问题；由一个自带事务的状态服务先落好状态，返回后再投递（题库生成）。剩下的缝隙是“提交了但没发出去”，需要恢复调度或者事务性发件箱。</p>
+    <p class="qa-follow">可能的追问：Outbox 怎么实现？（业务数据和待发消息写进同一个事务的发件表，独立线程扫描投递、成功后标记，消费端保证幂等。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q17</span>同一条消息被处理两次会怎样？怎么做幂等？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：至少一次投递下的幂等设计。</p>
+    <p>每个消费者处理前先检查：实体不存在或已经完成就直接 ACK 跳过。题库生成更严格，在行锁里比较 taskId 和当前状态再领取。结果写入依赖唯一约束，比如答案表的“会话 + 题号”。风险在于其他管线的领取只是直接改状态，不是比较后更新：多实例部署时，一个任务处理超过 5 分钟，会被另一个实例认领再跑一遍。改进方法是领取时用条件更新（只有状态还是 PENDING 才改成 PROCESSING），或者处理过程中定期刷新消息的空闲时间。</p>
+    <p class="qa-follow">可能的追问：为什么单实例不会出现这个问题？（每条管线只有一个消费线程，它忙着处理时不会去认领。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q18</span>题库生成的状态机怎么设计？怎么防止旧任务的结果覆盖新任务？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：并发下的状态一致性，这是项目里最严密的设计。</p>
+    <p>状态有 NONE、QUEUED、PROCESSING、COMPLETED、FAILED。每次提交生成一个 UUID 作为 taskId，存在知识库行上，消息里也带着。所有状态迁移都要求“传入的 taskId 等于当前 taskId，且当前状态符合预期”，比较和更新在 <code>SELECT … FOR UPDATE</code> 的行锁里完成。用户重新提交后 taskId 变了，旧 Worker 发起的任何迁移都会比较失败，结果直接丢弃。模型调用在锁和事务之外，最后才开一个短事务，再次核对 taskId，然后删旧题、存新题、写完成状态。另有每分钟一次的恢复调度：QUEUED 超过 2 分钟重投，PROCESSING 超过 20 分钟复位。生成参数存成快照，重试时不依赖消息体。</p>
+    <p class="qa-follow">可能的追问：为什么用悲观锁不用乐观锁？（迁移频率低、冲突时要立刻知道结果，悲观锁更直接；用版本号的乐观锁也可以实现。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q19</span>用户在出题时刷新页面，会不会重复生成一套题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：端到端的幂等设计。</p>
+    <p>不会，前后端配合。前端进入面试时生成一个 UUID 放进 URL（<code>/interview/create/{uuid}</code>），刷新时 URL 不变；创建成功后用 replace 跳到 <code>/interview/session/{id}</code>，之后刷新走恢复。后端三层：以请求 ID 加分布式锁，等待 185 秒、租约 600 秒，并发的重复请求排队；锁内先查 Redis 结果映射，再查数据库的 request_id 唯一列，都没有才调用模型出题；落库时撞上唯一索引就回查已有会话返回。代码里有一句注释：幂等请求必须先成功落库，再写入易失缓存，数据库是真相。</p>
+    <p class="qa-follow">可能的追问：锁超时了怎么办？（等待时间设得比一次出题的最长耗时略长；真超时了，第二个请求会走数据库唯一索引兜底。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q20</span>限流怎么实现？多个维度同时限流时怎么保证原子性？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Redis Lua 与分布式限流。</p>
+    <p>可重复的 <code>@RateLimit</code> 注解，一个接口可以叠加全局、IP、用户多条规则，切面把所有规则一次交给 Lua 脚本。算法是“滑动窗口加过期令牌回补”：每条规则一个计数键和一个记录发放时间的有序集合。原子性分两阶段：第一阶段只读，逐条算可用令牌，任何一条不够就返回失败的规则序号，一个键都不写；全部通过才进入第二阶段统一扣减。之前的版本在第一阶段就删了过期记录，被后面的维度拒绝时状态已经被改了，提交 ca2e812 修了这个问题，并用 Testcontainers 起真实 Redis 验证。键名里用花括号做 hash tag，保证同一接口的各维度在集群的同一个槽位。</p>
+    <p class="qa-follow">可能的追问：IP 从哪里取？（依次读 X-Forwarded-For、X-Real-IP，没做可信代理校验，可以伪造，生产要只信任网关写入的头。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q21</span>为什么说事务里不能调用大模型？项目里怎么处理的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：事务边界意识。</p>
+    <p>三个原因：事务期间一直占着数据库连接，模型调用十几秒，连接池很快被耗尽；事务里可能持有行锁，阻塞其他请求；外部调用不能随事务回滚，语义对不上。做法是外部调用放在事务外，事务只包最后的写入：向量化的几十次 Embedding 调用在事务外，只有“删旧 + 提升”在事务里；题库生成的模型调用在事务外，只有“替换题目 + 完成”在事务里；删除知识库时先在事务里删库，提交后再删向量和文件，失败只记录日志供补偿。</p>
+    <p class="qa-follow">可能的追问：删除时为什么先删数据库再删文件？（数据库是权威数据，先删它，最坏情况是留下孤儿文件，可以异步清理；反过来会留下指向不存在文件的记录。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q22</span><code>@Transactional</code> 什么情况下会失效？项目里遇到过吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Spring AOP 代理原理。</p>
+    <p>常见几种：同一个类里的方法互相调用，绕过了代理；注解加在非 public 方法上；受检异常默认不回滚；在新线程里执行；在 <code>@PostConstruct</code> 里调用，因为初始化回调时代理还没参与。项目里都能找到例子：语音评估服务在同类里调用标了事务的保存方法，事务不生效；Provider 种子数据初始化方法同时标了 <code>@PostConstruct</code> 和 <code>@Transactional</code>。项目的解决办法是一个 <code>TransactionalExecutor</code>：把要在事务里执行的代码以 lambda 形式交给它，它自己是一个独立的 Bean，调用一定经过代理。</p>
+    <p class="qa-follow">可能的追问：还有别的方案吗？（拆到另一个 Service；注入自身的代理；用编程式的 TransactionTemplate。）</p>
+  </div>
+</details>
+
+<h2 id="qa-data">数据与缓存</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q23</span>数据库表是怎么设计的？有哪些取舍？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：建模能力，能否讲出为什么。</p>
+    <p>16 张表，分成简历、文字面试、知识库与题库、问答会话、语音面试、模型配置、日程几组，加上 pgvector 的向量表。几个取舍：会话的题目列表、报告的优势建议等存成 JSON 文本，因为它们总是整体读写、不需要按字段查询；异步任务的状态直接放在业务表上（例如简历的分析状态），每张表一套状态字段，简单直观，代价是没有统一的任务表可以集中监控；文字面试会话有“答题状态”和“评估状态”两个独立字段；语音消息一行是“一次提问 + 对它的回答”。表结构由 Flyway 管理，Hibernate 只做校验，避免自动建表在生产环境改坏结构。</p>
+    <p class="qa-follow">可能的追问：外键是怎么考虑的？（简历、面试、知识库之间有物理外键；但题目表对知识库的外键没有级联，导致有题库的知识库删不掉，见 <a href="quality.html#findings">Q01</a>。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q24</span>一场面试的题目为什么存成 JSON，而题库又单独建表？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：同样的数据在不同场景下的建模差异。</p>
+    <p>面试会话的题目是一次性生成、整场固定不变、总是整体读取的，存成 JSON 最省事，答案另存一张表并用“会话 + 题号”唯一约束，重复提交只改同一行。题库则是需要长期维护的资产：要按状态、方向、难度筛选，要单独编辑、启用、归档，还要按条件统计容量，所以必须是一行一题的表。代价是面试记录不能直接按题目检索，比如“所有问过 Redis 持久化的面试”这种查询做不了。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q25</span>会话缓存怎么保证和数据库一致？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：缓存一致性策略。</p>
+    <p>文字面试的写路径是先写数据库、再更新 Redis：提交答案时答案、题号、状态先落库，失败直接报错；落库成功后更新缓存，缓存更新失败不影响正确性。读路径是先读 Redis，未命中就从数据库恢复（题目来自 JSON 字段，答案从答案表回填），再写回缓存，缓存 24 小时过期、访问时续期。语音会话缓存 1 小时，状态变化时直接删除缓存。一个隐患是语音缓存的是 JPA 实体本身，实体结构一改，缓存里的旧对象可能反序列化失败，把缓存对象和持久化实体分开更稳。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q26</span>上传去重为什么用内容哈希？有什么问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：细节设计。</p>
+    <p>按文件内容算 SHA-256，而不是按文件名，改名重传也能识别；数据库对哈希列建唯一索引兜底。命中时直接返回历史分析，省一次模型调用。问题有两个：两个请求同时上传同一个文件，都通过了去重检查，第二个插入时撞唯一索引，用户看到“保存失败”，而对象存储里多了一个孤儿文件；哈希计算用的是把整个文件读进内存的方式，大文件更适合流式计算（项目里其实已经有流式方法）。</p>
+  </div>
+</details>
+
+<h2 id="qa-rag">RAG 知识库问答</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q27</span>讲一下你们的 RAG 链路。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：RAG 的完整认识，不只是“向量检索 + 拼 Prompt”。</p>
+    <p>离线：上传后 Tika 解析，按约 800 token 分块，按每批 10 块调用 Embedding，写入 pgvector，元数据里带知识库 ID。在线：先结合最近的对话历史做查询改写；按问题长度决定 topK 和相似度阈值；用改写后的问题、不行再用原问题，带知识库过滤做向量检索；没命中就直接回固定文案，不调用模型；命中则把片段拼成上下文，系统提示词声明“只依据资料回答”和数据边界，流式调用模型；输出的前 120 字先进探测窗口，像拒答就换成固定回复，否则透传；SSE 推给前端。多轮对话时历史作为真正的对话消息传给模型。</p>
+    <p class="qa-follow">可能的追问：分块为什么是 800 token？（用的是 TokenTextSplitter 默认值，没有做过对比实验，这是可以改进的地方：加重叠、按标题切分，用评测集比较不同块大小。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q28</span>为什么要做查询改写？改写错了怎么办？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：多轮 RAG 的关键问题。</p>
+    <p>多轮对话里用户常问“那它的原理呢”，拿这句话去检索什么也找不到；太短太泛的问题也需要补充语义。改写 Prompt 拿到最近的对话历史（助手回复截断到 200 字），输出一句适合检索的完整查询。为了防止改写跑偏，改写结果和原问题都作为候选，按顺序检索，第一个有结果的胜出；改写调用失败就直接用原问题。代价是每次提问多一次模型调用，大约多几百毫秒到一秒，可以对“足够长且不含指代词”的问题跳过改写。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q29</span>检索阈值为什么要按问题长度动态调整？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对向量检索特性的理解。</p>
+    <p>两三个字的查询（比如“索引”）语义很“虚”，和相关段落的相似度普遍偏低，固定阈值会什么都召回不到，所以放低阈值、多取几条（去掉空白后不超过 4 个字：取 20 条、阈值 0.18）；中等长度取 12 条、阈值 0.28；长问题语义明确，取 8 条、阈值 0.28，减少噪声。这里有个小插曲：一次提交把短查询阈值的代码默认值提到 0.25，但配置文件里仍写着 0.18，配置优先，实际生效的还是 0.18。说明这类参数应该只在一处定义，并且最好有评测数据支撑。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q30</span>重新向量化失败会不会把知识库搞坏？过程中还能正常问答吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：数据切换的原子性，这是 RAG 模块最值得讲的设计。</p>
+    <p>不会，用的是影子写入。新任务的每个块先带临时标记写入：知识库 ID 字段写成 <code>pending:{知识库ID}:{任务ID}</code>，检索条件是按正式 ID 匹配，所以这些行对检索不可见，旧向量照常服务。全部批次成功后，在一个事务里删掉旧向量、用 <code>jsonb_set</code> 把临时标记改成正式 ID 并删掉临时字段；任何一批失败，就按任务 ID 清理临时数据，旧数据完全不受影响。两个任务并发时，后提交的整体胜出，不会新旧混杂。之前的实现是“先删旧的再写新的”，写到一半失败，知识库就只剩一部分向量。</p>
+    <p class="qa-follow">可能的追问：清理临时数据也失败了呢？（只记日志，临时行对检索不可见，不影响正确性，可以按任务 ID 离线补偿。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q31</span>检索不到相关内容时怎么处理？“探测窗口”是做什么的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：幻觉控制和用户体验。</p>
+    <p>检索为空时直接返回固定文案“在选定的知识库中未检索到相关信息”，不调用模型，既省钱又杜绝幻觉。检索有结果但模型认为资料不够时，模型往往会先客套一大段再说“无法回答”。探测窗口先缓冲流式输出的前 120 个字，其中出现“没有找到相关信息”“信息不足”等短语，就换成固定文案并取消上游；没出现就把缓冲区一次性放出，之后实时透传。副作用是可能误伤，一个“部分能答、部分信息不足”的回答会被整段替换，更好的做法是让模型输出一个明确的结构化标记，而不是靠关键词判断。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q32</span>这个 RAG 的效果还能怎么提升？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：RAG 优化的知识面。</p>
+    <p>按投入产出排序：先建评测集（问题和标注的相关片段），否则所有调参都是凭感觉；分块加重叠、按文档结构（标题、段落）切分；混合检索，向量加关键词（BM25 或 PostgreSQL 全文检索），用倒数排名融合；召回后用重排模型精排；回答里标注引用的片段和出处；给元数据的知识库 ID 建表达式索引，规模大时考虑分区或 pgvector 0.8 的迭代扫描，解决“先近邻后过滤”的召回损失。</p>
+  </div>
+</details>
+
+<h2 id="qa-voice">实时语音面试</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q33</span>语音面试的整体链路是怎样的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：实时系统的全链路理解。</p>
+    <p>浏览器用 AudioWorklet 采集麦克风，重采样成 16kHz 的 16 位 PCM，每 200 毫秒一帧，Base64 后通过 WebSocket 发给后端；后端为每个会话维持一条到 DashScope 实时识别的连接，识别结果作为可编辑字幕推回去。用户确认后点击提交，后端在虚拟线程上流式调用大模型，文本节流推给前端，每检测到一句就提交语音合成，最多 3 句并发，由有序发射器按句子序号下发音频块；前端用 AudioContext 队列拼接播放，播完才解锁录音。每轮的问答落库，结束后异步评估。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q34</span>怎么降低语音回复的首响时延？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：流水线并行的思路。</p>
+    <p>关键是让“生成”和“合成”重叠：模型流式输出，每凑够一句就开始合成，首句的合成和后续内容的生成并行，首响时延只取决于第一句的生成和合成时间，而不是整段回复。合成并发上限 3，既加快速度又不给服务端太大压力；有序发射器保证乱序完成的合成结果按顺序播放；前端收到第一块音频就开始播放。开场白的音频按文本缓存。还能继续优化的：每句合成都新建一条 WebSocket 连接，握手本身就是几十到几百毫秒，可以复用连接；语音配方每轮可能多一次工具调用往返；指标里缺一个“首句音频到达浏览器”的端到端时延。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q35</span>AI 的声音被麦克风录进去怎么办？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：实时音频的工程细节。</p>
+    <p>四层防护。浏览器层：采集时打开回声消除、降噪和自动增益。前端发送层：AI 说话期间（直到本地音频队列真正播完）和提交处理中，不发送任何音频帧。后端接收层：从开始调用模型到音频发完、再加 800 毫秒冷却期，丢弃所有上行音频，兜住前端判断失误和扬声器尾音。识别结果层：处理中或 AI 说话中迟到的识别结果直接丢弃，前端也忽略这段时间的未定稿字幕，防止上一轮的字串到下一轮。之所以前后端各做一层，是因为服务端并不知道浏览器什么时候真正播完。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q36</span>语音部分遇到过什么难排查的问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：排查能力，最好用 STAR 讲一个。</p>
+    <p>挑一个讲透：“第三轮起没有识别结果”。现象是前两轮正常，从第三轮开始识别不再返回。排查发现识别连接会被服务端关闭，代码在发送失败时重建连接，但旧连接的关闭回调是异步的，可能在新连接建好之后才触发，它按会话 ID 把表里的新连接也删掉了。修复是在关闭回调里比较对象身份，只有表里存的仍是自己这条连接时才删除，同时给同一会话的启停加锁。类似的还有：TTS 握手失败时 SDK 的 connect 永远不返回，整轮卡死，先写测试复现，再用虚拟线程加 5 秒超时并重写失败回调；开场白偶尔显示“未回答”，原因是先推前端后落库，用户答得快时找不到那条问题，改成先落库再推送。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q37</span>为什么放弃 VAD 自动提交，改成手动点击提交？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：技术方案与产品体验的权衡。</p>
+    <p>自动提交靠检测停顿来判断用户说完了，实际遇到两个问题：扬声器的声音被当成用户说话触发提交；中文面试里思考停顿两三秒很常见，一个回答被切成两次提交，面试官对着半句话追问。调 VAD 参数只能在“切得碎”和“反应慢”之间摇摆。最后改成识别只负责生成可编辑的文本，用户确认后手动提交，还能顺手修正识别错误。这是“用交互设计化解技术难题”的例子，代价是多一次点击。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q38</span>WebSocket 断开了会怎样？能多实例部署吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：有状态服务的可用性与扩展。</p>
+    <p>断开时后端清理会话状态、停止识别连接，如果会话还在进行中就自动结束并投递评估，避免状态永远停在进行中；5 分钟无活动会主动暂停并断开。但这里有个冲突：前端在非正常断开后会自动重连 3 次，而后端已经把会话结束了，网络抖动之后用户继续答题，评估却按不完整记录生成了，应该加一个断线宽限期。多实例方面，会话连接和状态都在单机内存里，需要按会话 ID 做粘性路由；返回给前端的地址还写死成了 <code>ws://localhost:8080</code>，Nginx 也没有配置 WebSocket 代理，远程部署前必须改。</p>
+  </div>
+</details>
+
+<h2 id="qa-frontend">前端</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q39</span>流式回答前端怎么接收？为什么不用 EventSource？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：SSE 的细节。</p>
+    <p>EventSource 只支持 GET，不能带请求体，而问答接口需要 POST 一个 JSON。所以用 fetch 拿到响应流，reader 逐块读、TextDecoder 流式解码，自己按 SSE 协议切分，支持“按行”和“按事件块”两种模式。几个细节：响应头如果是 JSON，说明在进入流式之前就报错了，按业务错误处理；回答里的换行在服务端转义、前端还原，否则会破坏 SSE 的分隔；渲染时把分片累加后用 requestAnimationFrame 合并到下一帧，并包在 startTransition 里，一帧最多重渲染一次 Markdown。缺的是取消，前端没有接入 AbortController。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q40</span>前端怎么统一处理后端的错误？下载文件出错怎么识别？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：请求层封装。</p>
+    <p>后端所有接口都返回 HTTP 200 加 Result，Axios 响应拦截器统一解包：code 是 200 就把 data 交给页面，否则用后端的 message 构造 Error 抛出；没有响应时区分上传和普通请求给出不同提示。下载比较特殊：请求声明了 blob，后端出错时返回的 JSON 也会被包成 Blob。封装检查 Blob 的类型和大小，是 JSON、文本或者不超过 64KB 就尝试按 Result 解析，解析成功说明是错误，否则才当文件保存。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q41</span>异步任务的状态前端怎么跟踪？为什么选轮询不用推送？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：方案取舍。</p>
+    <p>统一 3 秒轮询状态字段。任务耗时在几秒到几分钟，轮询实现简单、无状态、天然支持刷新和多标签页，也不依赖长连接的负载均衡。两种写法：单任务详情页用 setTimeout 链，上一次返回后才安排下一次，不会堆积；列表页只有存在处理中的条目才启动定时器，结果先浅比较，没变化就不更新。状态到文案的映射抽成纯函数并有单测，比如题库页只在“同一个任务从进行中变为完成”时才刷新列表。用户量上来后可以改成 SSE 推送任务状态，减少空轮询。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q42</span>浏览器里怎么采集 16k PCM？为什么用 AudioWorklet？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Web Audio 基础。</p>
+    <p>getUserMedia 拿到麦克风流，建一个 16kHz 的 AudioContext，加载一个 AudioWorklet 处理器：在音频线程里做线性插值重采样、浮点转 16 位整数，攒够 3200 个采样（200 毫秒）用 postMessage 发给主线程；主线程转 Base64 后发送。处理链末端接一个增益为 0 的节点，保证链路运转又不回放麦克风声音。用 AudioWorklet 而不是已废弃的 ScriptProcessorNode，是因为后者跑在主线程，页面一忙就会丢帧、卡顿。</p>
+  </div>
+</details>
+
+<h2 id="qa-quality">质量、测试与 AI 辅助开发</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q43</span>项目怎么测试的？覆盖得怎么样？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：测试意识，以及能否客观评价。</p>
+    <p>后端 36 个测试类，JUnit 5、Mockito、AssertJ，中文 DisplayName，以不启动容器的单元测试为主；限流用 Testcontainers 起真实 Redis 做集成测试；文档解析用真实样例文件测试。前端把易错的判断逻辑抽成纯函数，用 Node 自带的测试运行器执行，另有 3 个 Playwright 端到端用例，用假 WebSocket 和假麦克风测语音页。CI 跑后端全量测试、前端纯函数测试和构建。客观说，覆盖不均衡：出过问题的模块测试很厚，但结构化输出、统一评估、出题、RAG 查询这些核心类没有直接测试；唯一的容器级集成测试被禁用了，测试配置文件本身还是非法 YAML，所以 CI 从没验证过应用能完整启动。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q44</span>你们说的“先复现再修复”是怎么做的？举个例子。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：工程方法论。</p>
+    <p>以题库生成为例。问题是：首次消费失败后状态一直停在 PROCESSING；用户重新提交后，旧 Worker 仍然把结果写进来。先提交一组测试，13 个用例里 2 个按预期失败，失败原因正好对应这两个问题（提交 7915d65）；再写状态事务的契约测试，因为相关类还不存在而编译失败（7cf90b3）；然后实现状态服务和 taskId 围栏，让测试转绿（3ac6178），前端的轮询逻辑也同样先失败后通过（4f5765f）；最后跑全量测试、前端构建、在临时的 PostgreSQL 16 上执行 Flyway 迁移、用浏览器走一遍主流程。每一步的命令和结果都记在一份证据文档里。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q45</span>这个项目用了 AI 编码工具吗？怎么保证 AI 写的代码质量？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对 AI 辅助开发的成熟认识。现在很多面试官会主动问。</p>
+    <p>用了，仓库里有直接证据：给 Claude Code 和 Codex 共用的规则文件（AGENTS.md、CLAUDE.md、按目录生效的规则），部分提交带 AI 协作者署名，还有 TDD 证据文档。保证质量靠几件事：把长期规则写进规则文件，让工具每次都在同样的约束下工作；先写失败的测试，用可执行的结果判断是否完成；每次都跑全量测试和构建；人工审查 diff，尤其是配置和测试的改动。反面例子也有：一次 AI 协作的提交在替换模型名时弄坏了测试配置的缩进，同一个提交还把失败的集成测试禁用了，并写了一个不准确的原因。所以我的原则是：AI 可以写代码，但“测试被跳过”“配置被改”这类改动必须由人确认。</p>
+    <p class="qa-follow">可能的追问：那你自己的价值在哪？（定义问题和验收标准、拆分任务、设计关键方案、审查和兜底，见 <a href="vibe-coding.html">Claude Code 复刻</a>。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q46</span>如果让你给这个项目做代码审查，你会指出哪些问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：批判性思维和优先级判断。</p>
+    <p>挑影响最大的讲三四条，并说明怎么修：数据类问题，生成过题库的知识库删不掉（外键没有级联），重新生成题库会清空已启用和手工维护的题；失败语义问题，简历分析失败被降级成 0 分报告，重试机制失效；事务问题，同类自调用让语音评估的保存事务失效；接口问题，创建面试漏了 <code>@Valid</code>，还有一个遗留的 GET 接口会同步重跑整场评估；测试问题，唯一的容器级测试被禁用。完整清单见 <a href="quality.html#findings">质量与问题</a>。讲的时候最好说“我修了其中哪几条、怎么验证的”。</p>
+  </div>
+</details>
+
+<h2 id="qa-open">开放与设计题</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q47</span>如果要支撑一万人同时在线，瓶颈在哪？怎么改？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：系统设计能力。</p>
+    <p>第一瓶颈是模型厂商的配额和成本，其次是自己的几处单点。改法：Web 层本身无状态（语音除外），可以水平扩容；Stream 消费者改成可配置的并发消费，按任务类型拆成独立的 Worker 服务，领取改成条件更新；语音拆成独立网关，按会话 ID 粘性路由，识别和合成连接做连接池与会话数上限；模型调用加按用户的配额、多 Provider 负载与故障切换；数据库读写分离，向量表按知识库分区并补元数据索引；限流改成按用户维度，前提是有登录体系；静态资源上 CDN。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q48</span>如果要正式上线，你还会补哪些东西？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：生产意识。</p>
+    <p>身份与权限：登录、多用户数据隔离（现在语音会话的用户 ID 固定为 default），管理接口只对管理员开放。部署：WebSocket 走 Nginx 和 wss，SSE 关闭代理缓冲，密钥放密钥管理服务并支持轮换。可靠性：Outbox、死信队列、任务管理后台。可观测：链路追踪、按功能和用户统计 token 与费用、结构化日志带请求 ID。数据：简历属于个人敏感信息，要有保留期限、删除和脱敏策略，数据库和对象存储要备份。质量：CI 加容器级集成测试、端到端测试和镜像扫描。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q49</span>这个项目里你最满意和最不满意的设计分别是什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：审美和反思。</p>
+    <p>最满意的可以选题库生成状态机或向量影子写入：都是用很小的代码量（一个 taskId 围栏、一个临时标记）解决了并发和失败下的一致性问题，而且都有测试证明。最不满意的可以选语音模块：会话状态全在单机内存里；模型失败时的提示被当成面试官的话念出来并存档；断线重连和断线即结束互相冲突。这说明实时链路的正常路径打磨得很细，但异常路径的数据语义还不够严谨。</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">Q50</span>如果重新设计，你会做哪些不同的选择？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：成长性。</p>
+    <p>几个方向：用一张通用的任务表加 Outbox 管理所有异步任务，而不是每张业务表各带一套状态字段，监控、重试、死信都能统一；从第一天就有用户体系，所有数据带用户 ID；Prompt 版本化并配评测集，改 Prompt 像改代码一样有回归；前端用 OpenAPI 生成类型和客户端，避免前后端类型手工同步；语音链路把异常路径（断线、模型失败、合成失败）当作一等公民来设计，事件和状态显式建模。</p>
+  </div>
+</details>

@@ -1,0 +1,311 @@
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 业务模块</p>
+  <h1>业务模块逐个拆解：每个功能背后的真实链路</h1>
+  <p class="lead">前几页讲的是横切的底座：模型接入、异步模板、一致性。这一页按功能走一遍，从用户点下按钮开始，到数据落到哪张表、哪一步调模型、失败了会怎样。每个模块最后都列出读源码时发现的实现细节和问题，面试官问“这里有什么可以改进的”时，这些就是你的答案。</p>
+</header>
+
+<h2 id="overview">模块总览</h2>
+<p>六个业务模块的骨架是一样的：Controller 只做路由和校验，业务编排在 Service，数据库读写再单独拆出一个 PersistenceService，这样事务边界可以收得很小。凡是要调模型且结果不必马上拿到的，都落库后投递到 Redis Stream，前端按 3 秒间隔轮询状态字段。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>模块</th><th>主要表</th><th>异步管线</th><th>调模型的地方</th><th>前端页面</th></tr></thead>
+    <tbody>
+      <tr><td>简历</td><td><code>resumes</code>、<code>resume_analyses</code></td><td>简历分析</td><td>五维评分与建议</td><td>上传页、简历库、简历详情</td></tr>
+      <tr><td>文字面试</td><td><code>interview_sessions</code>、<code>interview_answers</code></td><td>面试评估</td><td>出题（1–2 次）、评估（分批 + 汇总）、JD 解析</td><td>模拟面试入口、答题页、面试记录</td></tr>
+      <tr><td>知识库与问答</td><td><code>knowledge_bases</code>、<code>vector_store</code>、<code>rag_chat_*</code></td><td>向量化</td><td>查询改写、流式回答、Embedding</td><td>知识库上传与管理、问答助手</td></tr>
+      <tr><td>题库面试</td><td><code>knowledge_base_questions</code>，会话复用 <code>interview_sessions</code></td><td>题库生成</td><td>生成题目、参考答案与追问</td><td>题库页、题库面试入口</td></tr>
+      <tr><td>面试日程</td><td><code>interview_schedule</code></td><td>无（每小时定时任务）</td><td>邀约文本解析兜底</td><td>日历页</td></tr>
+      <tr><td>系统设置</td><td><code>llm_provider_config</code>、<code>llm_global_setting</code></td><td>无</td><td>连通性测试</td><td>设置页</td></tr>
+    </tbody>
+  </table>
+</div>
+<p class="small muted">语音面试单独成页，见 <a href="voice.html">语音面试</a>。</p>
+
+<h2 id="resume">简历管理</h2>
+<h3 id="resume-upload">上传链路</h3>
+<ol class="steps">
+  <li><strong>基本校验</strong>：文件非空，大小不超过 10MB。</li>
+  <li><strong>按内容识别类型</strong>：用 Tika 读文件头的魔数（文件名只作辅助），不信任浏览器上报的 Content-Type，再和配置里的白名单（PDF、DOC、DOCX、纯文本）比对。改个扩展名伪装的文件过不了这一关。</li>
+  <li><strong>按内容去重</strong>：对整个文件算 SHA-256，命中已有记录就把访问次数加一，直接返回最近一次分析结果，并提示“检测到相同简历，已返回历史分析结果”。同一份简历改个文件名再传，也会被识别出来。</li>
+  <li><strong>解析正文</strong>：Tika 自动识别解析器，只取正文（上限 500 万字符）；禁用嵌入文档解析，避免把图片引用、临时文件路径抽出来；PDF 关闭内嵌图片提取、按坐标排序文本，改善双栏简历的阅读顺序。</li>
+  <li><strong>清洗</strong>：去掉控制字符、整行的图片文件名、图片链接、<code>file:</code> 协议路径和分隔线，统一换行符，去掉行尾空白，把三个以上连续换行压成一个空行。清洗后为空，就提示“请确保文件不是扫描版 PDF”，项目没有做 OCR。</li>
+  <li><strong>存原件</strong>：对象键形如 <code>resumes/2026/08/14/1a2b3c4d_ZhangSanJianLi.pdf</code>，按日期分目录，前缀 8 位随机串防重名，中文文件名转成大驼峰拼音，其他特殊字符替换成下划线，规避 S3 对键名的兼容问题。</li>
+  <li><strong>落库并投递</strong>：状态写 PENDING 后提交事务，再把“简历 ID + 正文”写入分析 Stream，接口立即返回。前端拿到 ID 后开始轮询。</li>
+</ol>
+<h3 id="resume-analysis">分析与报告</h3>
+<p>分析 Prompt 的人设是“10 年以上经验的技术架构师兼人才顾问”，要求做三件事：纠正不规范的技术名词（如 mysql 写成 MySQL）、挑 2–3 条项目经历按 STAR 法则给出“原句 vs 优化句”、对平庸的技术方案给出替代建议。评分是固定权重的五个维度：</p>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>维度</th><th class="num">满分</th><th>看什么</th></tr></thead>
+    <tbody>
+      <tr><td>项目经验</td><td class="num">40</td><td>是否避开烂大街项目，有没有复杂问题排查、业务闭环和量化结果</td></tr>
+      <tr><td>技能匹配度</td><td class="num">20</td><td>技术栈表述是否专业，“了解 / 熟悉 / 熟练掌握”是否分清</td></tr>
+      <tr><td>内容完整性</td><td class="num">15</td><td>模块顺序是否合理</td></tr>
+      <tr><td>结构清晰度</td><td class="num">15</td><td>技术名词大小写是否规范</td></tr>
+      <tr><td>表达专业性</td><td class="num">10</td><td>语言是否简洁</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>用户 Prompt 里还附了一份“技术优化基准”表（多级缓存、Lua 原子操作、CompletableFuture 编排、Canal 同步、分库分表等参考表达），让建议有统一的“好简历长什么样”的锚点。简历正文用固定的“简历内容开始 / 结束”分隔符包起来，并声明其中是数据而不是指令。输出经结构化执行器校验后，优势和建议以 JSON 存进 <code>resume_analyses</code>，前端用雷达图展示五个维度的得分。每次分析都是新的一行，所以简历详情页能看到分析历史，以及用这份简历做过的所有面试。</p>
+<p>导出 PDF 用 iText 8，内嵌了朱雀仿宋字体（强制嵌入，否则在没装中文字体的机器上会乱码），导出前去掉 emoji 这类字体里没有的符号。“重新分析”时优先用库里缓存的正文，没有再从对象存储下载重新解析，改状态和投递分两步：先用小事务把状态改回 PENDING 并提交，再投递。</p>
+<h3 id="resume-notes">实现细节与问题</h3>
+<ul>
+  <li><strong>降级吞掉了重试</strong>：模型调用失败时，评分服务返回一份 0 分、摘要为“分析过程中出现错误”的报告，消费者把它当成功保存并标记 COMPLETED。Stream 模板的三次重试、FAILED 状态和前端的“重新分析”入口都因此失效，用户看到的是一份 0 分报告。</li>
+  <li><strong>列表页 N+1</strong>：简历列表对每份简历再查一次最新分析、再查一次面试记录，100 份简历就是 201 条 SQL，违反了项目自己“不要循环调用 DB”的规则。</li>
+  <li><strong>删除顺序和知识库相反</strong>：简历是先删对象存储文件，再分两个事务删面试和简历记录；如果后面失败，会留下没有原件的记录。知识库删除则是“先删数据库，提交后再清理文件”，后者更合理。</li>
+  <li><strong>并发上传同一文件</strong>：两个请求同时通过去重检查，第二个在插入时撞上唯一索引，用户看到“保存简历失败”，对象存储里还多了一个孤儿文件。可以在唯一索引冲突时回查已有记录并删除刚上传的文件。</li>
+  <li><strong>错误信息透传</strong>：解析失败时把异常原文拼进提示返回给前端，暴露了内部细节。</li>
+  <li><strong>Prompt 小瑕疵</strong>：评分细则里写的字段名是 <code>projectTechDepth</code>，JSON 格式说明里却是 <code>projectScore</code>，靠结构化输出的 schema 兜住了。</li>
+</ul>
+
+<h2 id="text-interview">文字模拟面试</h2>
+<p>入口在“模拟面试”页：选面试方向（10 个 Skill 或粘贴 JD 生成自定义方向）、难度（初级 / 中级 / 高级）、题量（界面提供 6、8、10、12 题）、是否带简历、用哪个模型。出题逻辑见 <a href="ai-foundation.html#question-generation">AI 底座 · 出题流程</a>，幂等创建见 <a href="reliability.html#idem-create">可靠性 · 刷新不重复出题</a>，这里讲会话本身。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 290" role="img" aria-label="文字面试的两个状态字段：会话状态从 CREATED 在取第一题时变为 IN_PROGRESS，最后一题提交或提前交卷时变为 COMPLETED，同时把评估状态置为 PENDING 并投递任务；消费者领取后评估状态变为 PROCESSING，写报告时会话状态变为 EVALUATED，随后评估状态变为 COMPLETED；重试耗尽则评估状态为 FAILED。">
+      <defs>
+        <marker id="ti-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="ti-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+        <marker id="ti-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <text class="dg-z" x="16" y="20">会话状态 status</text>
+      <rect class="dg-box plain" x="16" y="50" width="130" height="46" rx="23"/>
+      <text class="dg-t" x="81" y="78" text-anchor="middle">CREATED</text>
+      <rect class="dg-box" x="256" y="50" width="150" height="46" rx="23"/>
+      <text class="dg-t" x="331" y="78" text-anchor="middle">IN_PROGRESS</text>
+      <rect class="dg-box" x="516" y="50" width="150" height="46" rx="23"/>
+      <text class="dg-t" x="591" y="78" text-anchor="middle">COMPLETED</text>
+      <rect class="dg-box good" x="786" y="50" width="158" height="46" rx="23"/>
+      <text class="dg-t" x="865" y="78" text-anchor="middle">EVALUATED</text>
+      <line class="dg-line" x1="146" y1="73" x2="254" y2="73" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="201" y="42" text-anchor="middle">取第一题</text>
+      <line class="dg-line" x1="406" y1="73" x2="514" y2="73" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="461" y="42" text-anchor="middle">末题提交 · 提前交卷</text>
+      <line class="dg-line" x1="666" y1="73" x2="784" y2="73" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="725" y="42" text-anchor="middle">报告落库</text>
+
+      <path class="dg-line accent dash" d="M591,96 L591,128 L331,128 L331,164" marker-end="url(#ti-c)"/>
+      <text class="dg-lbl accent" x="461" y="122" text-anchor="middle">同时置 PENDING 并 XADD</text>
+      <path class="dg-line dash" d="M630,166 L630,140 L865,140 L865,98" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="748" y="134" text-anchor="middle">消费者写报告</text>
+
+      <text class="dg-z" x="16" y="158">评估状态 evaluate_status</text>
+      <rect class="dg-box plain" x="16" y="166" width="130" height="46" rx="23"/>
+      <text class="dg-t" x="81" y="194" text-anchor="middle">（空）</text>
+      <rect class="dg-box accent" x="256" y="166" width="150" height="46" rx="23"/>
+      <text class="dg-t" x="331" y="194" text-anchor="middle">PENDING</text>
+      <rect class="dg-box accent" x="516" y="166" width="150" height="46" rx="23"/>
+      <text class="dg-t" x="591" y="194" text-anchor="middle">PROCESSING</text>
+      <rect class="dg-box good" x="786" y="166" width="158" height="46" rx="23"/>
+      <text class="dg-t" x="865" y="194" text-anchor="middle">COMPLETED</text>
+      <rect class="dg-box bad" x="786" y="232" width="158" height="44" rx="22"/>
+      <text class="dg-t" x="865" y="259" text-anchor="middle">FAILED</text>
+      <line class="dg-line" x1="406" y1="189" x2="514" y2="189" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="461" y="182" text-anchor="middle">消费者领取</text>
+      <line class="dg-line" x1="666" y1="189" x2="784" y2="189" marker-end="url(#ti-a)"/>
+      <text class="dg-lbl" x="725" y="182" text-anchor="middle">评估完成</text>
+      <path class="dg-line warn" d="M591,212 L591,254 L784,254" marker-end="url(#ti-w)"/>
+      <text class="dg-lbl warn" x="688" y="248" text-anchor="middle">重试 3 次仍失败</text>
+    </svg>
+  </div>
+  <figcaption>一个会话有两个相互独立的状态字段：<code>status</code> 描述答题进度，<code>evaluate_status</code> 描述异步评估。把它们分开，前端才能区分“面试还没交卷”和“交卷了但报告还在生成”，后者展示进度条并轮询。</figcaption>
+</figure>
+<h3 id="ti-lifecycle">会话生命周期</h3>
+<ul>
+  <li><strong>创建</strong>：会话 ID 是 16 位十六进制串。带简历且没勾选“强制新建”时，先找这份简历未完成的会话（先查 Redis 索引，再查数据库），有就直接返回，这就是“继续上次面试”。</li>
+  <li><strong>作答</strong>：两种写法。“暂存”只保存当前题答案、不前进；“提交”保存答案并把当前题号加一，提交的是最后一题时会话变为 COMPLETED 并触发评估。两者都是先写数据库（答案按“会话 + 题号”唯一，重复提交只改同一行），再更新 Redis。</li>
+  <li><strong>提前交卷</strong>：已交卷或已评估的会话再交卷会被拒绝；否则置为 COMPLETED、评估状态 PENDING，然后投递。</li>
+  <li><strong>评估</strong>：消费者从 <code>questions_json</code> 还原题目、把答案表回填进去，按会话记录的模型调用统一评估引擎。知识库面试的题目自带参考答案和评分规则，会优先作为评估基线。</li>
+  <li><strong>写报告</strong>：一个事务里写会话的总分、评语、优势、改进建议和参考答案，并把每道题的分数、反馈、参考答案、要点写回答案表；没作答的题也补一行，分数为 0。</li>
+  <li><strong>查看</strong>：面试记录页把文字面试和语音面试合并展示，顶部是历次得分的趋势折线图；详情里有逐题得分、反馈和参考答案，可以导出 PDF 和删除（级联删除答案）。</li>
+</ul>
+<h3 id="ti-notes">实现细节与问题</h3>
+<ul>
+  <li><strong>校验注解没生效</strong>：创建请求上写了题量 3–20、方向不能为空的校验注解，但接口参数前漏了 <code>@Valid</code>，这些约束一条都不执行，出题服务里也没有截断题量。项目里其他写了校验注解的请求体都配了 <code>@Valid</code>，只有这一处漏掉。</li>
+  <li><strong>遗留的同步报告接口</strong>：<code>GET /api/interview/sessions/{id}/report</code> 仍然会在请求线程里把整场面试同步评估一遍并覆盖已有报告，没有限流。前端早已改成读异步结果，这个接口没有调用方，却是一个能被反复触发的昂贵操作，应该删除或改成只读。</li>
+  <li><strong>简历文本来自前端</strong>：出题用的简历正文是前端随请求传上来的，而评估时用的是数据库里 <code>resumeId</code> 对应的正文。两个来源在正常使用时一致，但后端其实没必要信任客户端传来的正文。</li>
+  <li><strong>吞掉的失败</strong>：没有幂等键的创建路径里，会话落库失败只打一条告警，这场面试就只存在 Redis 里，24 小时后消失；暂存答案失败也只打告警，前端以为保存成功。</li>
+  <li><strong>请求体用 Map</strong>：提交和暂存答案的接口用 <code>Map&lt;String, Object&gt;</code> 接参再强转，传错类型会变成 500，而不是清晰的参数错误。</li>
+</ul>
+
+<h2 id="rag">知识库与 RAG 问答</h2>
+<h3 id="kb-upload">上传</h3>
+<p>和简历上传同一套流程，差别在三处：大小上限 50MB；类型判断是“MIME 在白名单里，或者扩展名是 <code>.md</code> / <code>.markdown</code> / <code>.mdown</code>”，因为 Markdown 常被识别成普通文本；正文不存数据库，只随消息发给向量化消费者，“重新向量化”时再从对象存储下载解析。上传时可以填名称和分类，列表页支持按分类筛选、搜索、排序和统计。</p>
+<h3 id="vector-shadow">向量化与影子写入</h3>
+<p>分块用 Spring AI 的 <code>TokenTextSplitter</code> 默认配置（每块约 800 token，在标点处断开，块之间没有重叠），Embedding 按每批 10 块调用，这是 DashScope 接口的批量上限。真正值得讲的是“重新向量化”怎么做到失败不污染、过程中不停服：</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 300" role="img" aria-label="影子写入：新任务先切块，给每块打上 pending 加知识库 ID 加任务 ID 的临时标记，分批嵌入写入；全部成功后在一个事务里删除旧向量并把临时标记提升为正式知识库 ID；任一批失败则按任务 ID 清理临时数据。整个过程中检索只匹配正式知识库 ID，所以一直使用旧向量，提升之后切换到新向量。">
+      <defs>
+        <marker id="vs-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="vs-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+        <marker id="vs-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="44" width="150" height="60" rx="8"/>
+      <text class="dg-t" x="91" y="69" text-anchor="middle">切块</text>
+      <text class="dg-s" x="91" y="89" text-anchor="middle">约 800 token · 无重叠</text>
+      <rect class="dg-box" x="196" y="44" width="200" height="60" rx="8"/>
+      <text class="dg-t" x="296" y="69" text-anchor="middle">打临时标记</text>
+      <text class="dg-m" x="296" y="89" text-anchor="middle">kb_id = pending:42:{jobId}</text>
+      <rect class="dg-box" x="426" y="44" width="160" height="60" rx="8"/>
+      <text class="dg-t" x="506" y="69" text-anchor="middle">分批嵌入并写入</text>
+      <text class="dg-s" x="506" y="89" text-anchor="middle">每批 10 块</text>
+      <rect class="dg-box good" x="616" y="44" width="328" height="60" rx="8"/>
+      <text class="dg-t" x="780" y="69" text-anchor="middle">一个事务：删旧向量 + 提升新向量</text>
+      <text class="dg-m" x="780" y="89" text-anchor="middle">DELETE kb_id='42' · jsonb_set kb_id → '42'</text>
+      <line class="dg-line" x1="166" y1="74" x2="194" y2="74" marker-end="url(#vs-a)"/>
+      <line class="dg-line" x1="396" y1="74" x2="424" y2="74" marker-end="url(#vs-a)"/>
+      <line class="dg-line accent" x1="586" y1="74" x2="614" y2="74" marker-end="url(#vs-c)"/>
+      <text class="dg-lbl accent" x="600" y="36" text-anchor="middle">全部成功</text>
+
+      <rect class="dg-box warn" x="426" y="160" width="160" height="56" rx="8"/>
+      <text class="dg-t" x="506" y="183" text-anchor="middle">按 jobId 清理</text>
+      <text class="dg-s" x="506" y="202" text-anchor="middle">清理失败只记日志</text>
+      <line class="dg-line warn" x1="506" y1="104" x2="506" y2="158" marker-end="url(#vs-w)"/>
+      <text class="dg-lbl warn" x="514" y="136">任一批失败</text>
+      <rect class="dg-box plain" x="616" y="160" width="328" height="56" rx="8"/>
+      <text class="dg-t" x="780" y="183" text-anchor="middle">检索条件：kb_id in ['42']</text>
+      <text class="dg-s" x="780" y="202" text-anchor="middle">临时行不匹配，任务进行中检索不受影响</text>
+
+      <text class="dg-z" x="16" y="252">检索实际看到的数据</text>
+      <rect class="dg-box plain" x="16" y="262" width="594" height="26" rx="4"/>
+      <text class="dg-s" x="313" y="279" text-anchor="middle">旧向量（任务进行中、任务失败后都照常服务）</text>
+      <rect class="dg-box good" x="616" y="262" width="328" height="26" rx="4"/>
+      <text class="dg-s" x="780" y="279" text-anchor="middle">提升提交之后：新向量</text>
+    </svg>
+  </div>
+  <figcaption>几十上百次 Embedding 调用都在事务外完成，只有最后两条 SQL 在一个事务里。失败时旧向量毫发无损，成功时检索在一次提交的瞬间整体切换，不会出现“新旧混杂”或“空窗期”。两个重新向量化任务并发时，后提交的那个整体胜出，同样不会混杂。</figcaption>
+</figure>
+<p>这套机制来自提交 <span class="sha">72aff88</span>（“将知识库向量化改为临时任务提升，避免失败时污染正式检索数据”）。在它之前，重新向量化是“先删旧的再写新的”，写到一半失败，知识库就只剩一部分向量。实现上有两处小心思：元数据列是 <code>json</code> 类型，提升时先转 <code>jsonb</code> 用 <code>jsonb_set</code> 改 <code>kb_id</code>、删掉两个临时键，再转回 <code>json</code>；删除语句额外兼容了旧版本数据里的 <code>kb_id_long</code> 字段，并刻意避开 PostgreSQL 的 <code>?</code> 操作符，因为它会和 JDBC 占位符冲突。</p>
+<h3 id="rag-pipeline">问答链路</h3>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 250" role="img" aria-label="RAG 问答链路：用户问题带最近 10 条历史先做查询改写，按问题长度决定 topK 和相似度阈值，先用改写后的问题、再用原问题做带知识库过滤的向量检索，都没命中直接返回固定回复不调用模型；命中则拼接上下文流式调用模型，前 120 字进入探测窗口，像查不到的回答被替换成固定回复，否则透传，经 SSE 推给前端。">
+      <defs>
+        <marker id="rp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="rp-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+        <marker id="rp-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="44" width="140" height="60" rx="8"/>
+      <text class="dg-t" x="86" y="69" text-anchor="middle">用户问题</text>
+      <text class="dg-s" x="86" y="89" text-anchor="middle">带最近 10 条历史</text>
+      <rect class="dg-box" x="176" y="44" width="140" height="60" rx="8"/>
+      <text class="dg-t" x="246" y="69" text-anchor="middle">查询改写</text>
+      <text class="dg-s" x="246" y="89" text-anchor="middle">失败退回原问题</text>
+      <rect class="dg-box" x="336" y="44" width="260" height="60" rx="8"/>
+      <text class="dg-t" x="466" y="69" text-anchor="middle">按问题长度定检索参数</text>
+      <text class="dg-s" x="466" y="89" text-anchor="middle">≤4字 20/0.18 · ≤12字 12/0.28 · 其余 8/0.28</text>
+      <rect class="dg-box accent" x="616" y="44" width="180" height="60" rx="8"/>
+      <text class="dg-t" x="706" y="69" text-anchor="middle">带过滤的向量检索</text>
+      <text class="dg-s" x="706" y="89" text-anchor="middle">改写版优先，其次原问题</text>
+      <rect class="dg-box warn" x="816" y="44" width="128" height="60" rx="8"/>
+      <text class="dg-t" x="880" y="69" text-anchor="middle">固定回复</text>
+      <text class="dg-s" x="880" y="89" text-anchor="middle">不调用模型</text>
+      <line class="dg-line" x1="156" y1="74" x2="174" y2="74" marker-end="url(#rp-a)"/>
+      <line class="dg-line" x1="316" y1="74" x2="334" y2="74" marker-end="url(#rp-a)"/>
+      <line class="dg-line" x1="596" y1="74" x2="614" y2="74" marker-end="url(#rp-a)"/>
+      <line class="dg-line warn" x1="796" y1="74" x2="814" y2="74" marker-end="url(#rp-w)"/>
+      <text class="dg-lbl warn" x="806" y="36" text-anchor="middle">都未命中</text>
+
+      <rect class="dg-box" x="616" y="164" width="180" height="60" rx="8"/>
+      <text class="dg-t" x="706" y="189" text-anchor="middle">拼上下文调用模型</text>
+      <text class="dg-s" x="706" y="209" text-anchor="middle">流式 · 数据边界声明</text>
+      <rect class="dg-box accent" x="336" y="164" width="260" height="60" rx="8"/>
+      <text class="dg-t" x="466" y="189" text-anchor="middle">探测窗口：前 120 字</text>
+      <text class="dg-s" x="466" y="209" text-anchor="middle">像“查不到”就换固定回复并取消上游</text>
+      <rect class="dg-box plain" x="16" y="164" width="300" height="60" rx="8"/>
+      <text class="dg-t" x="166" y="189" text-anchor="middle">SSE 推给前端</text>
+      <text class="dg-s" x="166" y="209" text-anchor="middle">换行先转义成 \n，前端再还原</text>
+      <line class="dg-line accent" x1="706" y1="104" x2="706" y2="162" marker-end="url(#rp-c)"/>
+      <text class="dg-lbl accent" x="714" y="138">命中</text>
+      <line class="dg-line" x1="616" y1="194" x2="598" y2="194" marker-end="url(#rp-a)"/>
+      <line class="dg-line" x1="336" y1="194" x2="318" y2="194" marker-end="url(#rp-a)"/>
+      <text class="dg-lbl" x="327" y="156" text-anchor="middle">正常则透传</text>
+    </svg>
+  </div>
+  <figcaption>两个“省模型调用”的设计：检索没命中就不调用模型，直接回固定文案；模型开头就在说“查不到”时立刻截断，不让它输出一大段客套的拒答。带过滤的检索如果报错，会退化成不带过滤取 3 倍结果、在内存里按知识库 ID 过滤。</figcaption>
+</figure>
+<ul>
+  <li><strong>为什么要改写</strong>：多轮对话里用户常问“那它的原理呢”，直接拿这句去检索什么也找不到。改写 Prompt 拿到最近的对话历史（助手回复截断到 200 字），输出一句适合检索的完整查询。改写结果和原问题都作为候选，按顺序检索，第一个有结果的胜出，防止改写跑偏。</li>
+  <li><strong>为什么按长度调参</strong>：两三个字的查询（例如“索引”）向量很“虚”，和相关段落的相似度普遍偏低，所以阈值放低、多取几条；长问题语义明确，少取几条、阈值抬高，减少噪声。中间档的分界值 12 写死在代码里，其他值都可配置。</li>
+  <li><strong>多轮上下文</strong>：历史消息作为真正的对话消息传给模型，而不是拼进文本。取最近 10 条已完成的消息，实现上多查一条再丢掉最新的那条，因为当前这轮的用户消息已经先落库了（<span class="sha">1bf8f1b</span>）。</li>
+  <li><strong>流式与落库</strong>：发消息时先在一个事务里保存用户消息和一条“未完成”的助手占位消息，再开始流式输出；完成时写入完整内容，出错时保存已收到的部分或错误提示。会话支持改标题、置顶、更换关联的知识库，标题默认取知识库名。</li>
+  <li><strong>Prompt 里的流式格式规范</strong>：系统提示词花了很大篇幅规定 Markdown 格式（<code>##</code> 后必须有空格、列表项独立成行等），因为流式渲染时格式不规范会导致前端边收边渲染出错。</li>
+</ul>
+<div class="callout risk">
+  <span class="label">RAG 部分可以深挖的问题</span>
+  <p><strong>断开连接的占位消息</strong>：流式接口只处理了“完成”和“出错”，没处理“取消”。用户中途关页面，助手占位消息会永远停在未完成、内容为空。<strong>拒答判断会误伤</strong>：只要回答里出现“信息不足”等短语就整体替换成固定回复，而系统提示词恰恰要求模型在资料不全时“明确说明信息缺失”，一个“部分能答、部分信息不足”的正常回答可能被整段吞掉。<strong>配置漂移</strong>：提交 <span class="sha">1bf8f1b</span> 把短查询阈值的代码默认值从 0.18 提到 0.25，但 <code>application.yml</code> 里仍写着默认 0.18，yml 优先，实际生效的还是 0.18。<strong>规模化</strong>：<code>vector_store</code> 只有 HNSW 向量索引，元数据上没有索引，按 <code>kb_id</code> 删除、提升、清理都是全表扫描；HNSW 先取近邻再按元数据过滤，目标知识库在全库里占比很小时召回会明显不足，可以考虑表达式索引、分区，或 pgvector 0.8 的迭代扫描。<strong>检索质量</strong>：分块没有重叠，没有关键词检索做混合召回，没有重排，回答也不标注出处。</p>
+</div>
+
+<h2 id="kb-interview">题库与题库面试</h2>
+<p>这是项目里最新、也是一致性设计最用心的模块（2026 年 6–7 月的十几个提交）。流程是：知识库向量化完成 → 生成草稿题 → 人工审核、编辑、启用 → 按容量抽题面试 → 用题目自带的参考答案和评分规则评估。生成任务的状态机见 <a href="reliability.html#state-machine">可靠性 · 题库生成状态机</a>。</p>
+<h3 id="kb-generate">生成：给模型什么上下文</h3>
+<p>生成参数是难度（初级 / 中级 / 高级）、题量 1–30（默认 5）、每题追问 0–5（默认 2）、方向数 1–5。上下文不是把整份资料塞给模型，而是用四个“探针查询”在这个知识库里各取 4 个片段：</p>
+<ul>
+  <li>核心概念、定义、背景、原理</li>
+  <li>关键流程、步骤、方法、工作机制</li>
+  <li>规则约束、条件、边界、例外、限制</li>
+  <li>典型案例、常见问题、应用场景、最佳实践</li>
+</ul>
+<p>片段按文本去重，最多 12 个，拼起来截断到 5000 字，用随机分隔符包好。Prompt 里还会告诉模型这个知识库已有哪些方向（前 10 个及题数，引导复用方向名）以及同难度最近 20 道题（避免重复）。调用用的是不带工具的 plain 配方，结果走结构化输出。落库前逐题清洗：空题干跳过；题干做 Unicode 规范化、转小写、只保留字母数字后比较，重复的跳过并计数；方向为空时用知识库名；追问截断到请求的数量。每道题还记录了生成时用的上下文和知识库内容哈希。</p>
+<p>用四个固定的探针查询代替“随机取片段”，是在低成本下尽量覆盖资料的不同侧面：概念题、流程题、边界题、场景题各有来源。代价是资料很长时，12 个片段只覆盖其中一小部分。</p>
+<h3 id="kb-bank">题目状态与维护</h3>
+<p>题目有四种状态：生成出来是草稿（DRAFT），人工确认后启用（ACTIVE），不想用了归档（ARCHIVED），还有一个预留的过期（STALE），代码里目前没有任何地方会把题目置为过期。只有 ACTIVE 的题会被抽进面试。题库页支持按状态和方向筛选、分页、批量选择、编辑题干和参考答案、手动新增题目。</p>
+<h3 id="kb-capacity">容量矩阵与严格抽题</h3>
+<p>开始题库面试时，用户选方向（可不选，表示全部方向）、难度、主问题数 1–20、每题追问数 0–5。项目的原则是“严格满足，不静默降级”：凑不够就明确告诉用户差在哪。为了在用户点“开始”之前就知道能不能凑够，后端提供一个容量接口，返回一张矩阵：</p>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>每题追问数</th><th class="num">满足条件的启用题</th><th>要 5 道主问题时能否开始</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td class="num">12</td><td><span class="tag green">可以</span></td></tr>
+      <tr><td>1</td><td class="num">12</td><td><span class="tag green">可以</span></td></tr>
+      <tr><td>2</td><td class="num">9</td><td><span class="tag green">可以</span></td></tr>
+      <tr><td>3</td><td class="num">4</td><td><span class="tag red">不够</span></td></tr>
+      <tr><td>4</td><td class="num">1</td><td><span class="tag red">不够</span></td></tr>
+      <tr><td>5</td><td class="num">0</td><td><span class="tag red">不够</span></td></tr>
+    </tbody>
+  </table>
+</div>
+<p class="small muted">表中数字为示意。每一行的含义是“追问池里至少有这么多个有效追问的启用题有几道”；同时返回各方向的可用题数，按数量降序，前端据此禁用不可行的选项并给出提示。</p>
+<p>抽题时，先筛出“方向、难度匹配、状态启用、追问数够”的候选题，打乱后取前 N 道；每道题的追问再从追问池里随机取指定个数（局部 Fisher–Yates 洗牌，不改动原列表），让同一道题每次的追问组合不同。万一在“查容量”和“开始”之间题库被改了导致追问不够，直接报错而不是少问几个。组装好的题目列表交给文字面试的会话服务创建会话，来源标记为 KNOWLEDGE_BASE，之后答题、评估、报告全部复用文字面试的链路。</p>
+<p>这部分的边界是用测试逼出来的：<span class="sha">54e1bb0</span> 先写严格容量的测试，<span class="sha">9cdcb8c</span> 严格校验追问数量，<span class="sha">0b99aaa</span> 完善容量边界；完成面试后的跳转与结果展示也是 <span class="sha">20ca85c</span> 先复现、<span class="sha">1f82388</span> 再修复。</p>
+<h3 id="kb-notes">实现细节与问题</h3>
+<ul>
+  <li><strong>删不掉的知识库</strong>：题目表对知识库有外键但没有级联删除，知识库实体上也没有映射题目集合，删除服务只处理了问答会话的关联。一旦生成过题库，删除这个知识库就会因外键约束失败。这个场景没有测试覆盖。</li>
+  <li><strong>重新生成会清空整个题库</strong>：生成成功后在事务里先删除该知识库下的<em>全部</em>题目，再写入新题，包括用户已经启用、编辑过、甚至手动新增的题。生成弹窗只写着“生成草稿题”，没有任何覆盖提示。另外 Prompt 里传入“已有题目以避免重复”，而这些题马上就会被删掉，两个设计意图互相矛盾。更合理的是只替换草稿，或者追加。</li>
+  <li><strong>配置注入的方式</strong>：生成服务用 <code>@Value</code> 注入 Prompt 资源，并且每次调用都重新读文件，违反了项目“不要在 Service 里散落 @Value”的规则，其他服务都是通过配置属性类加载一次。</li>
+  <li><strong>题库面试不幂等</strong>：普通文字面试有请求 ID 防重复创建，题库面试的创建接口没有，连点两次会建两个会话。</li>
+</ul>
+
+<h2 id="schedule">面试日程</h2>
+<p>用户把飞书、腾讯会议、Zoom 的邀约文本粘进来，系统识别出公司、岗位、时间、会议链接和轮次，用户确认后保存到日历。日历基于 react-big-calendar，有月、周、日视图和列表视图，支持拖拽事件改期、拖动边缘调整时长。</p>
+<h3 id="schedule-parse">规则优先，模型兜底</h3>
+<ol class="steps">
+  <li>按来源（没传就按文本里的关键词：“飞书”“腾讯会议”“会议号”“zoom.us”）选择对应的正则解析器，关键词都没有时三种依次尝试。</li>
+  <li>只有同时拿到公司、岗位、时间才算规则解析成功，返回置信度 0.95、来源 rule。</li>
+  <li>否则调用模型：Prompt 里带上当天日期（用来推算“明天下午两点”这类相对时间），默认时长 30 分钟，要求输出纯 JSON；代码再剥掉可能的 Markdown 代码块、容错解析时间格式。成功返回置信度 0.8、来源 ai。</li>
+  <li>都失败则提示解析失败，用户手动填写。</li>
+</ol>
+<p>这个设计的出发点是成本和确定性：格式规整的邀约用正则就够了，毫秒级、零成本、结果确定；只有规则搞不定的才花一次模型调用。另有一个每小时整点执行的定时任务，把时间已过、仍是“待面试”的日程批量改成“已取消”。</p>
+<h3 id="schedule-notes">实现细节与问题</h3>
+<ul>
+  <li><strong>会议号重复</strong>：腾讯会议解析器取的是整个匹配而不是捕获组，结果会变成“会议号: 会议号：123456789”，密码同理。</li>
+  <li><strong>Zoom 规则永远不完整</strong>：Zoom 解析器只提取链接和时间，不提取公司和岗位，而“成功”要求三者齐全，所以 Zoom 邀约的规则解析形同虚设，必然走模型。事实上多数真实邀约没有“公司：”“岗位：”这样的标签，飞书和腾讯的规则也很难命中。</li>
+  <li><strong>来源被当成了模型 ID</strong>：模型兜底时把来源参数（feishu、tencent、zoom）当作 Provider ID 传进注册表，会因为找不到 Provider 而失败。前端目前不传来源，所以没有暴露，但接口本身是坏的。</li>
+  <li><strong>过期即取消的语义</strong>：面试时间过了不代表面试取消了，更可能是面试已经进行、用户没来得及标记。自动改成“待确认”会更贴近真实情况。</li>
+  <li><strong>置信度是常量</strong>：0.95 和 0.8 是写死的，并不反映这次解析的可靠程度。</li>
+</ul>
+
+<h2 id="settings">系统设置</h2>
+<p>设置页管理模型 Provider：新增、编辑、删除、测试连通性，分别选择默认的聊天模型和默认的向量模型，以及语音识别与合成的参数。注册表本身的设计见 <a href="ai-foundation.html#registry">AI 底座 · 多模型注册表</a>，这里讲设置功能的实现。</p>
+<ul>
+  <li><strong>Key 加密存储</strong>：API Key 用 AES-GCM 加密后存库，每次加密生成 12 字节随机 nonce，认证标签 128 位，nonce 和密文分别 Base64 存储。主密钥来自环境变量：如果是 32 字节的 Base64 就直接用，否则对字符串做 SHA-256 得到密钥。没配置主密钥时默认拒绝启动，只有显式打开开发开关才会用内置的开发密钥。接口返回的永远是打码后的 Key。</li>
+  <li><strong>连通性测试</strong>：用 Provider 的配置发一个最小请求（一句“Reply with OK only.”，<code>max_tokens</code> 为 1），先试 <code>{baseUrl}/chat/completions</code>，地址里没有版本号时再试 <code>/v1/chat/completions</code>；连接超时 5 秒、读超时 10 秒；失败时把状态码和截断后的响应体返回给页面，方便排查。</li>
+  <li><strong>SSRF 防护</strong>：测试请求用的 HTTP 客户端挂了地址过滤器，只允许公网地址、回环地址和 198.18.0.0/15。放行回环是为了支持本机的 LM Studio，放行 198.18.0.0/15 是因为很多本地代理工具的 fake-ip 模式会把域名解析到这个网段。</li>
+  <li><strong>向量模型防呆</strong>：开启向量能力的 Provider 必须填向量模型名和维度，模型名如果像聊天模型（以 glm-、deepseek、qwen、kimi 等开头）会被拒绝，并提示该厂商推荐的向量模型名。这是踩过坑之后加的：把聊天模型填成向量模型，向量化会全部失败。</li>
+  <li><strong>并发与热加载</strong>：所有读操作拿读锁、写操作拿写锁，写完调用注册表的 <code>reload</code> 清空客户端缓存，下一次调用按新配置重建，不用重启。</li>
+</ul>
+<div class="callout risk">
+  <span class="label">设置模块的保留意见</span>
+  <p>地址过滤只加在“测试连通性”这一条路径上，保存 Provider 时并不校验 <code>baseUrl</code>，之后真正的模型调用也不经过过滤器，所以它挡住的只是“借测试接口探测内网”，而不是“把模型请求指向内网”；再加上所有管理接口都没有鉴权，这层防护意义有限。写操作是在 <code>@Transactional</code> 方法内部加锁、在 <code>finally</code> 里解锁，解锁发生在事务提交之前，其他线程可能在提交前读到旧数据；注册表的 <code>reload</code> 也在提交前执行。主密钥没有版本号，更换密钥会让库里所有 Key 无法解密，需要设计轮换方案。语音参数写进了 <code>~/.interview-guide</code> 下的文件，但启动时并不读取，重启后丢失，见 <a href="architecture.html#deployment">架构 · 部署</a>。</p>
+</div>

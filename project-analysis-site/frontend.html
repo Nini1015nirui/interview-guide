@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>前端 · InterviewGuide 项目拆解</title>
+<meta name="description" content="统一请求层、自研 SSE 客户端、幂等路由、轮询约定、音频采集与播放、测试与构建。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html" aria-current="page">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 前端</p>
+  <h1>前端工程实现：把异步和流式体验做顺</h1>
+  <p class="lead">前端是一个 React 18 + TypeScript 的单页应用，页面本身并不复杂，工程上值得讲的是它怎么配合后端的三种交互方式：统一的请求层消化“HTTP 200 + 业务码”，自己实现的 SSE 客户端读流式回答，一组轮询约定跟踪异步任务，以及语音面试的音频采集和播放。最后讲它的测试方式和构建部署。</p>
+</header>
+
+<h2 id="fe-overview">技术栈与结构</h2>
+<dl class="facts">
+  <dt>框架</dt>
+  <dd>React 18.3（StrictMode）· TypeScript 5.6（strict，未使用的变量和参数直接报错）· React Router 7</dd>
+  <dt>构建</dt>
+  <dd>Vite 5：开发时把 <code>/api</code> 代理到 8080；生产构建把 React、UI 库、代码高亮拆成三个独立的 vendor 包；另挂了 WASM 和顶层 await 插件，服务于语音的 ONNX 运行时</dd>
+  <dt>样式与动效</dt>
+  <dd>Tailwind CSS 4（含 typography 插件渲染 Markdown）· framer-motion · lucide-react 图标 · 明暗主题（本地记忆 + 跟随系统）</dd>
+  <dt>功能库</dt>
+  <dd>react-markdown + remark-gfm + react-syntax-highlighter（问答回答）· react-virtuoso（长对话虚拟列表）· Recharts（简历雷达图、面试得分趋势）· react-big-calendar（日程，支持拖拽改期）· dayjs</dd>
+  <dt>目录约定</dt>
+  <dd><code>api/</code> 每个后端模块一个文件，统一复用 <code>request.ts</code>；<code>types/</code> 放共享类型；<code>pages/</code> 放页面和它们的纯函数模块；<code>components/</code> 放可复用组件；<code>constants/routes.ts</code> 放路由常量</dd>
+  <dt>规模</dt>
+  <dd>85 个 TS/TSX 文件约 1.8 万行，最大的几个页面是设置页（约 1500 行）、语音面试页（约 950 行）、面试记录页（约 890 行）</dd>
+</dl>
+<p>所有页面都用 <code>lazy</code> 按需加载，外层一个 <code>Suspense</code>，布局组件提供侧边导航，分三组：面试准备（简历管理、模拟面试、面试记录、面试日程）、知识库（知识库管理、知识库面试、问答助手）、系统（设置），页面通过 <code>Outlet</code> 渲染。首页直接跳到简历管理。</p>
+
+<h2 id="api-layer">API 层：统一消化业务码</h2>
+<p>后端约定所有接口都返回 HTTP 200，成败看 <code>Result</code> 里的 <code>code</code>。前端在一个 Axios 实例的响应拦截器里把这件事一次做完，页面代码拿到的永远是 <code>data</code> 本身，出错时拿到的是一个带后端原文提示的 <code>Error</code>：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>情况</th><th>拦截器怎么处理</th><th>页面拿到什么</th></tr></thead>
+    <tbody>
+      <tr><td>响应是 Result 且 code 为 200</td><td>把 <code>response.data</code> 换成 <code>result.data</code></td><td>业务数据</td></tr>
+      <tr><td>响应是 Result 但 code 不是 200</td><td>reject 一个 Error，消息用后端的 message</td><td>“简历不存在”这类可直接展示的提示</td></tr>
+      <tr><td>HTTP 非 2xx 但响应体是 Result</td><td>尝试解析响应体（包括 Blob）</td><td>后端的 message</td></tr>
+      <tr><td>没有响应，且是上传请求</td><td>不假设是文件太大</td><td>“上传失败，可能是网络超时或连接中断”</td></tr>
+      <tr><td>没有响应的其他请求</td><td>—</td><td>“网络连接失败，请检查网络”</td></tr>
+    </tbody>
+  </table>
+</div>
+<ul>
+  <li><strong>文件下载</strong>：下载请求用 <code>responseType: 'blob'</code> 并跳过 Result 转换。难点在于：后端出错时返回的是 JSON 形式的 Result，但因为请求声明了 blob，它也会被包成一个 Blob。封装会检查 Blob 的类型和大小（JSON、文本或不超过 64KB 才尝试解析），能解析出 Result 就按错误处理，否则才当文件保存。</li>
+  <li><strong>超时分级</strong>：普通请求 60 秒；上传 300 秒，和 Nginx 的读超时对齐；创建面试、提交答案、非流式知识库问答这类可能等待模型的请求单独放宽到 180 秒。</li>
+  <li><strong>类型</strong>：<code>request.get&lt;T&gt;</code> 等方法直接返回 <code>Promise&lt;T&gt;</code>，每个模块的 API 文件定义自己的请求和响应类型。</li>
+</ul>
+
+<h2 id="sse">SSE 客户端：为什么不用 EventSource</h2>
+<p>浏览器自带的 <code>EventSource</code> 只能发 GET 请求，不能带请求体，而问答接口需要 POST 一个 JSON。所以项目用 <code>fetch</code> 拿到响应流，再用 <code>ReadableStream</code> 的 reader 逐块读取、<code>TextDecoder</code> 以流模式解码，自己按 SSE 协议切分。这个客户端有几处考究：</p>
+<ul>
+  <li><strong>先判断是不是真的流</strong>：如果响应头是 JSON，说明后端在进入流式之前就报错了（比如限流、参数错误），这时按 Result 解析并抛出业务错误，而不是把一段 JSON 当回答显示出来。</li>
+  <li><strong>两种解析模式</strong>：“行模式”每遇到一行 <code>data:</code> 就回调一次；“事件模式”按空行切分事件块，同一块里的多行 data 按配置的连接符拼起来，并识别 <code>event: error</code>。两个流式接口的编码方式不同，所以分别使用不同模式。</li>
+  <li><strong>换行转义</strong>：SSE 用换行分隔事件，回答内容里的换行会破坏格式。后端推送前把 <code>\n</code>、<code>\r</code> 转义成字面量，前端再还原，Markdown 的段落和列表才能保持。</li>
+  <li><strong>流中的业务错误</strong>：某一条 data 如果是 JSON 且带有 error / failed 标记，同样按错误抛出。</li>
+  <li><strong>渲染节流</strong>：每来一个分片不直接 setState，而是把内容累加到变量里，用 <code>requestAnimationFrame</code> 合并到下一帧，并包在 <code>startTransition</code> 里降低优先级。一帧最多重渲染一次 Markdown，输入框不会卡。</li>
+</ul>
+<p>缺的一块是取消：整个前端没有使用 <code>AbortController</code>，用户不能中途停止生成，切走页面后请求也仍在后台读完。结合后端没有处理“取消”信号的问题（见 <a href="modules.html#rag">业务模块 · RAG</a>），停止生成需要前后端一起补。</p>
+
+<h2 id="routing">路由与幂等创建</h2>
+<p>文字面试的“刷新不重复出题”，前端这一半完全靠路由完成：</p>
+<ol class="steps">
+  <li>从任何入口进入 <code>/interview</code>，包装组件发现 URL 里没有请求 ID，就立刻用 <code>crypto.randomUUID()</code> 生成一个，<code>replace</code> 跳到 <code>/interview/create/{uuid}</code>，面试配置放在路由 state 里。</li>
+  <li>答题页挂载时用一个 <code>useRef</code> 标记保证只发起一次创建。React 18 的 StrictMode 在开发环境会把 effect 执行两次，没有这个标记就会创建两场面试（<span class="sha">5c878a3</span> 修复）。</li>
+  <li>创建请求带上这个请求 ID。等待期间用户刷新，URL 不变，请求 ID 不变，后端据此返回同一个会话。</li>
+  <li>创建成功后再 <code>replace</code> 到 <code>/interview/session/{sessionId}</code>。从此刷新走“恢复会话”：拉取会话，定位到当前题，恢复已填写的答案。两次 replace 保证浏览器历史里不会残留“创建”那一步，后退也不会重新触发创建。</li>
+</ol>
+<p>其他路由大多是字面量写在组件里，只有面试相关的几条放进了路由常量文件，这条项目规则只执行了一部分。</p>
+
+<h2 id="polling">轮询约定</h2>
+<p>所有异步任务（简历分析、向量化、面试评估、题库生成、语音评估）的结果都靠轮询状态字段拿到，间隔统一是 3 秒（题库面试入口页是 5 秒）。代码里有两种写法，适用场景不同：</p>
+<div class="split">
+  <div>
+    <h4>setTimeout 链</h4>
+    <p class="small">上一次请求返回后才安排下一次，请求不会堆积；组件卸载时设置取消标记。用在单个任务的详情页：语音评估页、题库生成页、题库面试的评估等待。</p>
+  </div>
+  <div>
+    <h4>条件 setInterval</h4>
+    <p class="small">只有列表里存在“处理中”的条目才启动定时器，全部完成就停；刷新结果先做浅比较，没有变化就不 setState，避免整表重渲染。用在简历库和面试记录这类列表页。</p>
+  </div>
+</div>
+<p>状态到界面文案的映射都抽成了纯函数。例如题库生成页只在“同一个任务从活动态变成 COMPLETED”时才刷新题目列表，防止首次加载时读到历史的完成状态而误触发刷新（<span class="sha">20ca85c</span>、<span class="sha">1f82388</span>）；语音评估在 PENDING 超过 2 分钟后把提示从“排队中”换成“等待较长，可以重新生成”。</p>
+
+<h2 id="audio">音频采集与播放</h2>
+<h3 id="audio-capture">采集</h3>
+<ol class="steps">
+  <li>申请麦克风时打开浏览器的回声消除、降噪和自动增益。</li>
+  <li>建一个采样率 16kHz 的 AudioContext，加载 <code>public/audio-worklet/pcm-processor.js</code>。Worklet 在音频线程里运行：线性插值重采样到 16kHz，浮点转 16 位整数，攒够 3200 个采样（200 毫秒）通过 <code>postMessage</code> 交给主线程。</li>
+  <li>主线程把 ArrayBuffer 分块转成 Base64（每块 32KB，避免 <code>String.fromCharCode</code> 参数过多导致栈溢出），交给页面判断是否发送。</li>
+  <li>处理链末端接一个增益为 0 的节点再连到输出，保证处理链持续运转，又不会把麦克风声音从扬声器放出来。</li>
+  <li>另有一个分析节点每 100 毫秒计算一次平均音量，驱动界面上的音量动画。</li>
+</ol>
+<p>相比已废弃的 <code>ScriptProcessorNode</code>，AudioWorklet 不占主线程，页面渲染再忙也不会丢音频帧。</p>
+<h3 id="audio-playback">播放</h3>
+<ul>
+  <li><strong>分块模式</strong>（默认）：收到 <code>audio_chunk</code> 后跳过 44 字节 WAV 头，把 16 位整数转成浮点，写进一个 24kHz 的 AudioBuffer 推入队列；上一段的 <code>onended</code> 触发下一段，实现无缝拼接。收到最后一块或 <code>audio_complete</code> 后，每 100 毫秒检查一次队列是否播完（最多等 30 秒），播完才把 AI 这轮的文字定稿为消息气泡，并解除录音锁定。</li>
+  <li><strong>整段模式</strong>：收到完整 WAV 交给 <code>&lt;audio&gt;</code> 元素播放，同时从 WAV 头里读出字节率和数据长度估算时长，设置一个“时长 + 1.5 秒，限制在 4–60 秒之间”的看门狗，防止 <code>ended</code> 事件丢失导致界面一直显示“面试官正在回答”。</li>
+  <li><strong>自动播放限制</strong>：浏览器拒绝播放时提示“请点击页面任意位置以启用音频播放”，并直接结束本轮播放状态。</li>
+</ul>
+<h3 id="audio-state">页面状态机</h3>
+<p>语音页用四个状态决定按钮能不能点：连接状态、识别是否就绪、AI 是否在说话、是否正在提交。“能录音”要求已连接、识别就绪、AI 没在说话、没有在提交；“能提交”要求有文本、AI 没在说话、没有在提交、已连接。这些状态同时存进 <code>ref</code>，因为 WebSocket 回调是在创建时捕获的闭包，读 state 会拿到旧值。为了防止某个信号丢失导致界面卡住，还有几个兜底计时器：只有文字没有音频时 2.5 秒后定稿，收到最终文字 15 秒后仍没有音频也定稿。</p>
+
+<h2 id="fe-tests">测试</h2>
+<h3 id="fe-unit">纯函数单测：不引入测试框架</h3>
+<p>前端没有引入 Jest 或 Vitest，而是把容易出错的判断逻辑从组件里抽成纯函数模块，用 Node 自带的测试运行器执行 <code>node --test xxx.test.ts</code>。Node 24 可以直接运行 TypeScript（类型擦除），不需要编译步骤，也不需要额外依赖。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>模块</th><th>测什么</th><th>CI 是否运行</th></tr></thead>
+    <tbody>
+      <tr><td><code>interviewEntry</code></td><td>带会话 ID 时恢复、否则创建</td><td><span class="tag green">是</span></td></tr>
+      <tr><td><code>interviewHistoryStats</code></td><td>面试记录页的统计口径：普通页按全部记录统计，知识库页按筛选结果统计，评估中的不算已完成</td><td><span class="tag green">是</span></td></tr>
+      <tr><td><code>questionGenerationStatus</code></td><td>生成状态文案、何时刷新题目列表</td><td><span class="tag green">是</span></td></tr>
+      <tr><td><code>interviewCapacity</code></td><td>容量矩阵到可选项、提示文案的换算</td><td><span class="tag green">是</span></td></tr>
+      <tr><td><code>voiceEvaluationStatus</code></td><td>语音评估状态展示、2 分钟延迟边界</td><td><span class="tag red">否</span></td></tr>
+      <tr><td><code>knowledgeBaseInterviewCompletion</code></td><td>题库面试交卷后：评估中停在等待页，完成后进详情，失败时展示失败状态</td><td><span class="tag red">否</span></td></tr>
+    </tbody>
+  </table>
+</div>
+<p>后两个测试文件存在，但没有写进 <code>package.json</code> 的脚本，CI 也就不会运行它们。</p>
+<h3 id="fe-e2e">Playwright 端到端测试</h3>
+<p>语音面试有 3 个浏览器端到端用例：麦克风音频发出后显示字幕和 AI 追问；提交后迟到的上一轮字幕不污染下一轮；结束面试后回到记录页。它们不依赖后端和任何云服务：</p>
+<ul>
+  <li>用 Chrome 的假媒体设备参数提供虚拟麦克风，并预先授予麦克风权限；</li>
+  <li>拦截 jsdelivr CDN 请求，用初始化脚本注入假的 VAD 对象；</li>
+  <li>用初始化脚本把 <code>window.WebSocket</code> 替换成一个假实现：收到音频就回推一条字幕，收到提交就回推 AI 的追问，还暴露一个测试钩子，让用例能在任意时刻“从服务端”推送消息；</li>
+  <li>REST 接口用 <code>page.route</code> 返回固定的 Result。</li>
+</ul>
+<p>这套写法把一个依赖三个云服务的实时功能变成了可重复、秒级完成的测试，是 AI 编码时“先写复现用例再修”的直接产物（<span class="sha">524d5ef</span>、<span class="sha">e9fc13f</span>）。不过 CI 目前只跑纯函数测试和构建，端到端测试需要本地手动执行。</p>
+
+<h2 id="fe-build">构建与部署</h2>
+<ul>
+  <li><strong>镜像</strong>：两阶段构建，第一阶段在 Node 镜像里安装依赖并执行 <code>tsc &amp;&amp; vite build</code>，第二阶段只把产物复制进 Nginx 镜像。</li>
+  <li><strong>Nginx</strong>：所有路径回退到 <code>index.html</code>，解决单页应用刷新 404；<code>/api/</code> 反代到后端，读、写、连接超时都是 300 秒；上传上限 50MB，与知识库上限一致；开启 gzip。</li>
+  <li><strong>环境变量</strong>：<code>VITE_API_BASE_URL</code> 控制接口前缀（默认同源），开发时 <code>VITE_API_PROXY_TARGET</code> 控制代理目标。</li>
+</ul>
+
+<h2 id="fe-issues">值得改进的地方</h2>
+<ul>
+  <li><strong>首屏被 CDN 脚本阻塞</strong>：ONNX 运行时和 VAD 两个脚本写在 <code>index.html</code> 的 head 里同步加载，所有页面都要等它们下载完，而 VAD 在语音页里已经不参与任何逻辑。应该删除，或至少改成语音页按需加载。</li>
+  <li><strong>依赖版本不一致</strong>：<code>package.json</code> 里声明了 onnxruntime-web 1.24.3，页面实际从 CDN 加载的是 1.22.0；仓库里同时存在 <code>package-lock.json</code> 和 <code>pnpm-lock.yaml</code> 两份锁文件。</li>
+  <li><strong>构建环境不一致</strong>：CI 用 Node 24、固定的 pnpm 版本和 <code>--frozen-lockfile</code>；Dockerfile 用 Node 20、全局安装最新 pnpm、不锁依赖，镜像构建结果可能和 CI 验证的不同。</li>
+  <li><strong>测试没有全部进 CI</strong>：6 个纯函数测试只跑 4 个，端到端测试不跑。</li>
+  <li><strong>没有取消能力</strong>：流式回答不能停止，语音连接的自动重连和后端“断线即结束”的策略冲突，见 <a href="voice.html#voice-issues">语音面试 · 已知问题</a>。</li>
+  <li><strong>大组件</strong>：设置页约 1500 行，语音页把连接、音频、状态机、界面放在一个组件里，可以拆成自定义 Hook（例如 <code>useVoiceSocket</code>、<code>useChunkedPlayer</code>）后再做单测。</li>
+  <li><strong>交互细节</strong>：语音暂停用浏览器确认框的“确定 / 取消”表示两种暂停方式，容易误操作。</li>
+</ul>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="voice.html"><span class="dir">上一页</span><span class="ttl">实时语音面试链路</span></a>
+      <a class="next" href="quality.html"><span class="dir">下一页</span><span class="ttl">测试、CI 与代码审查</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>

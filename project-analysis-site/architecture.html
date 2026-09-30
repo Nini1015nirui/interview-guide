@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>架构 · InterviewGuide 项目拆解</title>
+<meta name="description" content="分层与包结构、统一响应与异常、请求生命周期、16 张表的数据模型、选型取舍、部署与配置。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html" aria-current="page">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 架构</p>
+  <h1>整体架构与技术选型</h1>
+  <p class="lead">单体 Spring Boot 后端 + React 单页应用，外加三个基础组件（PostgreSQL、Redis、S3 兼容存储）和一组可切换的大模型服务。这一页讲清楚：进程之间怎么通信、代码怎么分层、一次请求怎么流动、数据存在哪里，以及每个技术为什么选它、放弃了什么。</p>
+</header>
+
+<h2 id="runtime">运行时全景</h2>
+<p>下图是 Docker Compose 部署后的运行时视图，箭头上写的是通信方式。后端对外只有两个入口：经 Nginx 反向代理的 HTTP（普通接口和 SSE 流式接口都走这里），以及语音面试用的 WebSocket。后者目前由前端直接连到 8080 端口，没有经过 Nginx，这是部署上的一个缺口，<a href="quality.html#findings">质量与问题</a> 一页有详细说明。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 400" role="img" aria-label="运行时全景：浏览器经 Nginx 访问后端 HTTP 接口，语音 WebSocket 直连后端 8080 端口；后端通过 JPA 访问 PostgreSQL，通过 Redisson 访问 Redis，通过 S3 协议访问对象存储，通过 HTTPS 调用大模型，通过 WSS 调用实时语音服务。">
+      <defs>
+        <marker id="rt-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="rt-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="160" width="150" height="64" rx="8"/>
+      <text class="dg-t" x="91" y="187" text-anchor="middle">浏览器</text>
+      <text class="dg-s" x="91" y="207" text-anchor="middle">React SPA</text>
+
+      <rect class="dg-box" x="226" y="72" width="160" height="64" rx="8"/>
+      <text class="dg-t" x="306" y="99" text-anchor="middle">Nginx 容器</text>
+      <text class="dg-s" x="306" y="119" text-anchor="middle">静态资源 · 反代 /api</text>
+
+      <rect class="dg-box accent" x="446" y="40" width="200" height="344" rx="10"/>
+      <text class="dg-t" x="546" y="70" text-anchor="middle">Spring Boot 应用</text>
+      <text class="dg-s" x="546" y="90" text-anchor="middle">单体 · :8080 · 虚拟线程</text>
+      <rect class="dg-box plain" x="462" y="112" width="168" height="40" rx="6"/>
+      <text class="dg-s" x="546" y="136" text-anchor="middle">REST / SSE 控制器</text>
+      <rect class="dg-box plain" x="462" y="192" width="168" height="40" rx="6"/>
+      <text class="dg-s" x="546" y="216" text-anchor="middle">WebSocket 语音处理器</text>
+      <rect class="dg-box plain" x="462" y="264" width="168" height="40" rx="6"/>
+      <text class="dg-s" x="546" y="288" text-anchor="middle">Stream 消费者 ×5</text>
+      <rect class="dg-box plain" x="462" y="324" width="168" height="40" rx="6"/>
+      <text class="dg-s" x="546" y="348" text-anchor="middle">定时恢复任务 ×4</text>
+
+      <rect class="dg-box" x="726" y="40" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="63" text-anchor="middle">PostgreSQL 16 + pgvector</text>
+      <text class="dg-s" x="835" y="82" text-anchor="middle">16 张表 · vector_store(1024)</text>
+      <rect class="dg-box" x="726" y="112" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="135" text-anchor="middle">Redis 7</text>
+      <text class="dg-s" x="835" y="154" text-anchor="middle">缓存 · 锁 · Stream · Lua</text>
+      <rect class="dg-box" x="726" y="184" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="207" text-anchor="middle">RustFS / MinIO</text>
+      <text class="dg-s" x="835" y="226" text-anchor="middle">简历与知识库原文件</text>
+      <rect class="dg-box" x="726" y="256" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="279" text-anchor="middle">大模型 Provider</text>
+      <text class="dg-s" x="835" y="298" text-anchor="middle">DashScope · DeepSeek · Kimi · GLM</text>
+      <rect class="dg-box" x="726" y="328" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="351" text-anchor="middle">DashScope 实时语音</text>
+      <text class="dg-s" x="835" y="370" text-anchor="middle">Qwen3 ASR 16kHz · TTS 24kHz</text>
+
+      <path class="dg-line" d="M91,160 L91,104 L224,104" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="158" y="97" text-anchor="middle">HTTP :80</text>
+      <line class="dg-line" x1="386" y1="132" x2="460" y2="132" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="420" y="125" text-anchor="middle">/api 反代</text>
+      <line class="dg-line warn dash" x1="168" y1="212" x2="460" y2="212" marker-start="url(#rt-w)" marker-end="url(#rt-w)"/>
+      <text class="dg-lbl warn" x="306" y="204" text-anchor="middle">ws://…:8080 直连，未经 Nginx</text>
+
+      <line class="dg-line" x1="646" y1="68" x2="724" y2="68" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="685" y="61" text-anchor="middle">JPA / JDBC</text>
+      <line class="dg-line" x1="648" y1="140" x2="724" y2="140" marker-start="url(#rt-a)" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="685" y="133" text-anchor="middle">Redisson</text>
+      <line class="dg-line" x1="646" y1="212" x2="724" y2="212" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="685" y="205" text-anchor="middle">S3 协议</text>
+      <line class="dg-line" x1="646" y1="284" x2="724" y2="284" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="685" y="277" text-anchor="middle">HTTPS</text>
+      <line class="dg-line" x1="648" y1="356" x2="724" y2="356" marker-start="url(#rt-a)" marker-end="url(#rt-a)"/>
+      <text class="dg-lbl" x="685" y="349" text-anchor="middle">WSS</text>
+    </svg>
+  </div>
+  <figcaption>后端内部有四种“代码被触发的方式”：HTTP 请求、WebSocket 消息、Stream 消费循环、定时任务。外部依赖里，大模型和实时语音是唯一不受控的一环，项目的大部分可靠性设计都围绕它们展开。</figcaption>
+</figure>
+
+<h2 id="layers">分层与包结构</h2>
+<p>后端是一个 Gradle 单模块工程，包根是 <code>interview.guide</code>。它没有按“controller / service / dao”横向切包，而是先分出通用能力、技术基础设施和业务模块三大块，业务模块内部再按 MVC 分层。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>包</th><th>职责</th><th>代表类</th></tr></thead>
+    <tbody>
+      <tr><td><code>common/ai</code></td><td>大模型接入与治理：多 Provider 注册表、结构化输出执行器、Prompt 净化、Skill 工具配置</td><td><code>LlmProviderRegistry</code>、<code>StructuredOutputInvoker</code>、<code>PromptSanitizer</code></td></tr>
+      <tr><td><code>common/annotation</code>、<code>aspect</code></td><td>可重复的 <code>@RateLimit</code> 注解与 AOP 切面</td><td><code>RateLimitAspect</code> + <code>rate_limit_single.lua</code></td></tr>
+      <tr><td><code>common/async</code></td><td>Redis Stream 生产者、消费者模板基类</td><td><code>AbstractStreamProducer</code>、<code>AbstractStreamConsumer</code></td></tr>
+      <tr><td><code>common/evaluation</code></td><td>文字、语音、知识库三种面试共用的评估引擎</td><td><code>UnifiedEvaluationService</code></td></tr>
+      <tr><td><code>common/exception</code>、<code>result</code></td><td>错误码、业务异常、全局异常处理、统一响应</td><td><code>ErrorCode</code>、<code>GlobalExceptionHandler</code>、<code>Result&lt;T&gt;</code></td></tr>
+      <tr><td><code>common/config</code>、<code>constant</code>、<code>transaction</code></td><td>类型安全配置、CORS、S3、OpenAPI、Stream 常量、小事务执行器</td><td><code>TransactionalExecutor</code>、<code>AsyncTaskStreamConstants</code></td></tr>
+      <tr><td><code>infrastructure/file</code></td><td>文件类型识别、解析、清洗、哈希、对象存储</td><td><code>DocumentParseService</code>、<code>FileStorageService</code></td></tr>
+      <tr><td><code>infrastructure/redis</code>、<code>export</code>、<code>mapper</code></td><td>Redis 操作封装、面试会话缓存、PDF 导出、MapStruct 映射器</td><td><code>RedisService</code>、<code>InterviewSessionCache</code>、<code>PdfExportService</code></td></tr>
+      <tr><td><code>modules/*</code></td><td>六个业务模块：<code>resume</code>、<code>interview</code>、<code>knowledgebase</code>、<code>voiceinterview</code>、<code>interviewschedule</code>、<code>llmprovider</code></td><td>每个模块自带 Controller、service、repository、model，有异步任务的再带 listener</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>约定写在 <code>AGENTS.md</code> 和 <code>.claude/rules/backend.md</code> 里，代码基本遵守：</p>
+<ul>
+  <li>Controller 只做路由、参数校验、限流注解和委托；业务编排在 Service；<code>@Transactional</code> 只放在 Service 的公开方法上，事务尽量小。</li>
+  <li>Entity 不直接返回前端，统一转成 <code>record</code> 形式的 DTO；重复的映射用 MapStruct 生成（<code>ResumeMapper</code>、<code>InterviewMapper</code>、<code>KnowledgeBaseMapper</code>、<code>RagChatMapper</code>），简单的一次性复制允许 <code>BeanUtils</code>。</li>
+  <li>配置全部走 <code>@ConfigurationProperties</code>，不在 Service 里散落 <code>@Value</code>。提交 <span class="sha">f87f435</span> 专门做了一次清理，并用 grep 扫描确认 <code>@Value</code>、<code>Executors.new</code>、<code>RuntimeException</code> 为零。</li>
+  <li>依赖通过构造器注入，配合 Lombok 的 <code>@RequiredArgsConstructor</code>。</li>
+</ul>
+<p>模块之间并不完全隔离，读代码时要注意几处横向依赖：简历删除会调用面试模块的持久化服务级联删除会话；知识库面试直接复用 <code>InterviewSessionService</code> 创建会话；简历分析结果的 DTO <code>ResumeAnalysisResponse</code> 放在了 interview 包里。这些是单体项目常见的“顺手依赖”，面试时被问到模块边界可以拿来当例子。</p>
+
+<h2 id="conventions">统一约定：响应、错误码与异常</h2>
+<h3 id="result">HTTP 200 + 业务码</h3>
+<p>所有接口返回 <code>Result&lt;T&gt;</code>（<code>code</code>、<code>message</code>、<code>data</code>），包括出错的时候：全局异常处理器统一用 <code>@ResponseStatus(HttpStatus.OK)</code> 返回，靠 <code>code</code> 区分成功（200）和各类失败。前端 Axios 拦截器据此统一解包或抛错。</p>
+<p>这种约定的好处是前端处理简单、错误信息总能带到页面上；代价是网关、监控和浏览器开发者工具无法从 HTTP 状态码识别失败，SSE 和文件下载这类“不是 JSON”的响应还要额外判断（前端为此专门写了 Blob 和流式响应里的错误识别，见 <a href="frontend.html#api-layer">前端工程</a>）。面试被问“为什么不用 HTTP 状态码”时，可以把这两面都讲出来。</p>
+<h3 id="error-codes">错误码分域</h3>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>区间</th><th>领域</th><th>例子</th></tr></thead>
+    <tbody>
+      <tr><td class="num">400–500</td><td>通用</td><td>BAD_REQUEST、NOT_FOUND、INTERNAL_ERROR</td></tr>
+      <tr><td class="num">2xxx</td><td>简历</td><td>2002 解析失败、2007 分析失败</td></tr>
+      <tr><td class="num">3xxx</td><td>面试</td><td>3006 出题失败、3009 符合条件的题目不足</td></tr>
+      <tr><td class="num">4xxx / 5xxx</td><td>存储 / 导出</td><td>4001 上传失败、5001 PDF 导出失败</td></tr>
+      <tr><td class="num">6xxx</td><td>知识库</td><td>6006 向量化失败</td></tr>
+      <tr><td class="num">7xxx</td><td>AI 服务</td><td>7002 超时、7004 密钥无效、7005 调用频率超限</td></tr>
+      <tr><td class="num">8xxx</td><td>限流</td><td>8001 请求过于频繁</td></tr>
+      <tr><td class="num">9xxx / 10xxx / 11xxx</td><td>日程 / 语音 / Provider</td><td>10004 语音评估失败、11007 默认 Provider 不可删除</td></tr>
+    </tbody>
+  </table>
+</div>
+<h3 id="exception-handler">全局异常处理</h3>
+<p><code>GlobalExceptionHandler</code> 按异常类型分别处理：业务异常原样返回码和消息；参数校验异常拼接字段错误；上传超限单独提示；AI 调用的网络异常用 Java 21+ 的 switch 模式匹配按 cause 细分（<code>SocketTimeoutException</code> 映射为“超时”，消息里含 handshake 映射为“网络不稳定”），HTTP 客户端异常再按消息里的 401、429 映射到“密钥无效”“频率超限”；兜底的 <code>Exception</code> 只返回“系统繁忙”，详细堆栈留在日志里。这套写法是在 Java 25 升级时（<span class="sha">4b96015</span>）改成模式匹配的。</p>
+
+<h2 id="request-lifecycle">一次请求怎么走：以上传简历为例</h2>
+<p>这是项目里最典型的“同步阶段只做快且确定的事，慢调用丢给异步”的链路，面试讲架构时可以拿它串起大部分组件。</p>
+<ol class="steps">
+  <li><strong>前端上传</strong>：<code>multipart/form-data</code> 经 Nginx 转发，Axios 对上传单独设置 5 分钟超时。</li>
+  <li><strong>限流</strong>：<code>@RateLimit</code> 切面在进入 Controller 前执行 Lua 脚本，全局和单 IP 各限每秒 5 次。</li>
+  <li><strong>校验</strong>：文件非空、不超过 10MB；用 Tika 基于文件内容识别 MIME 类型，而不是相信扩展名或请求头，再和白名单（PDF、DOC、DOCX、TXT）比对。</li>
+  <li><strong>去重</strong>：计算文件内容的 SHA-256，命中 <code>resumes.file_hash</code> 唯一索引就直接返回历史分析结果，并把访问次数加一。</li>
+  <li><strong>解析</strong>：Tika 提取正文（关闭嵌入资源解析，PDF 按坐标排序文本），再做文本清洗；提取不到文字时提示“可能是扫描版 PDF”。</li>
+  <li><strong>存原文件</strong>：上传到 RustFS / MinIO，对象键为 <code>resumes/年/月/日/UUID_拼音文件名</code>。</li>
+  <li><strong>落库</strong>：写入 <code>resumes</code> 表，分析状态为 <code>PENDING</code>。</li>
+  <li><strong>投递</strong>：向 <code>resume:analyze:stream</code> 发送一条消息（简历 ID、正文、重试次数 0），投递失败时把状态直接改成 <code>FAILED</code>。</li>
+  <li><strong>立即返回</strong>：接口返回 PENDING，前端跳到简历库，每 3 秒轮询一次列表。</li>
+  <li><strong>异步分析</strong>：消费者线程拉到消息，检查简历是否已删除或已完成，改为 <code>PROCESSING</code>，调用大模型做结构化评分，写入 <code>resume_analyses</code>，最后改为 <code>COMPLETED</code> 并 ACK；失败则重新入队，最多 3 次。</li>
+</ol>
+
+<h2 id="data-model">数据模型</h2>
+<p>共 16 张表，全部由 Flyway 的 <code>V1__init_schema.sql</code> 和 4 个增量脚本创建。按领域归类如下：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>领域</th><th>表</th><th>值得注意的设计</th></tr></thead>
+    <tbody>
+      <tr><td>简历</td><td><code>resumes</code>、<code>resume_analyses</code></td><td><code>file_hash</code> 唯一索引做内容去重；一份简历可以有多次分析记录，列表取最新一条；优势和建议以 JSON 文本存储</td></tr>
+      <tr><td>面试</td><td><code>interview_sessions</code>、<code>interview_answers</code></td><td><code>session_id</code> 和 <code>request_id</code> 各有唯一约束；题目整体存在 <code>questions_json</code>；答案表 <code>(session_id, question_index)</code> 唯一，天然支持“同一题重复提交只更新”；会话状态和评估状态是两个独立字段</td></tr>
+      <tr><td>知识库</td><td><code>knowledge_bases</code>、<code>knowledge_base_questions</code>、<code>vector_store</code></td><td>知识库行上同时承载向量化状态和题库生成任务的 8 个字段（状态、taskId、参数快照、计数、时间）；<code>vector_store</code> 是 Spring AI 的标准表结构（UUID、正文、JSON 元数据、<code>vector(1024)</code>），由 Flyway 建表并建 HNSW 余弦索引</td></tr>
+      <tr><td>问答会话</td><td><code>rag_chat_sessions</code>、<code>rag_chat_messages</code>、<code>rag_session_knowledge_bases</code></td><td>会话和知识库多对多；消息带 <code>message_order</code> 和 <code>completed</code> 标记，用于流式输出前先占位</td></tr>
+      <tr><td>语音面试</td><td><code>voice_interview_sessions</code>、<code>voice_interview_messages</code>、<code>voice_interview_evaluations</code></td><td>评估表 <code>session_id</code> 唯一；上下文摘要复用消息表，以 <code>message_type = SUMMARY</code> 的特殊行保存，序号取负数编码“已覆盖的轮次数”，避免新增表</td></tr>
+      <tr><td>模型配置</td><td><code>llm_provider_config</code>、<code>llm_global_setting</code></td><td>API Key 以密文 + nonce 两列保存；全局设置是单例行，保存默认聊天和默认向量 Provider</td></tr>
+      <tr><td>日程</td><td><code>interview_schedule</code></td><td>状态用 CHECK 约束限定为四个枚举值</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>几个可以主动讲的取舍：</p>
+<ul>
+  <li><strong>JSON 存在 TEXT 列里</strong>（题目、优势、建议、参考答案等）。读写简单、结构可变，代价是不能在数据库里按字段查询或建索引。如果将来要做“按知识点统计错题”，就需要拆表或改成 JSONB。</li>
+  <li><strong>状态字段 + CHECK 约束</strong>。每个异步任务都有 <code>*_status</code> 和 <code>*_error</code> 两列，前端轮询这两列即可展示进度和失败原因。</li>
+  <li><strong>物理外键不一致</strong>。简历、面试、知识库、问答会话之间有外键；语音会话对简历只有逻辑关联。知识库和题目之间有外键但没有级联删除，这恰好导致了一个删除缺陷，见 <a href="quality.html#findings">质量与问题</a>。</li>
+  <li><strong><code>vector_store.metadata</code> 是 JSON 而不是 JSONB</strong>。项目用 <code>metadata-&gt;&gt;'kb_id'</code> 过滤和删除，数据量大时这类过滤无法走 GIN 索引。</li>
+</ul>
+
+<h2 id="choices">技术选型与取舍</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>选择</th><th>替代方案</th><th>为什么这样选</th><th>代价 / 边界</th></tr></thead>
+    <tbody>
+      <tr><td>PostgreSQL + pgvector</td><td>Milvus、Elasticsearch、Qdrant</td><td>业务数据和向量放一个库，少运维一个组件；向量和业务表可以在同一个事务里删改（本项目的“影子向量提升”就依赖这一点）</td><td>千万级向量以上、复杂混合检索时不如专用向量库；维度写死在表结构里，换模型要迁移</td></tr>
+      <tr><td>Redis Stream</td><td>Kafka、RabbitMQ、RocketMQ</td><td>Redis 已经用于缓存和锁，Stream 提供消费者组、ACK、pending 列表，足够支撑五类后台任务；README 明确写了“不想引入太多组件”</td><td>没有原生延迟队列和死信队列，重试靠重新 XADD；持久化依赖 Redis 的 AOF/RDB 配置</td></tr>
+      <tr><td>Redisson</td><td>Lettuce、Jedis</td><td>现成的分布式锁（看门狗）、Stream、脚本 API</td><td>4.0 版本在空结果时会抛 <code>ClassCastException</code>，项目里专门 catch 兼容</td></tr>
+      <tr><td>Spring AI + OpenAI 兼容协议</td><td>各厂商 SDK、LangChain4j</td><td>国内主流模型都提供 OpenAI 兼容接口，一套 <code>OpenAiChatModel</code> 换 base-url 即可接入；ChatClient、Advisor、结构化输出、VectorStore 开箱即用</td><td>“兼容”不等于完全一致，工具调用消息的校验差异曾导致出题失败（见 <a href="ai-foundation.html#skills">Skill 演进</a>）</td></tr>
+      <tr><td>虚拟线程（Java 25）</td><td>WebFlux 全响应式</td><td>请求处理大量阻塞在大模型和数据库 IO 上，虚拟线程让同步写法也能撑高并发；并行出题和语音管线也跑在虚拟线程上</td><td>SSE 部分仍用了 Reactor 的 <code>Flux</code>；锁内阻塞、<code>synchronized</code> 固定载体线程等问题需要留意</td></tr>
+      <tr><td>Flyway + <code>ddl-auto: validate</code></td><td>Hibernate 自动建表</td><td>表结构变更可审计、可回放；启动时 Hibernate 校验实体与表一致</td><td>测试环境用 H2 + <code>create-drop</code>，和生产方言不同，PostgreSQL 特有 SQL（如 JSON 操作）测不到</td></tr>
+      <tr><td>MapStruct</td><td>手写转换、BeanUtils</td><td>编译期生成代码，类型安全、零反射</td><td>JSON 字段仍要在 Service 里手动序列化，映射器里用默认方法补</td></tr>
+      <tr><td>Apache Tika</td><td>PDFBox + POI 分别处理</td><td>一个入口自动识别并解析多种格式</td><td>扫描件没有文字层时无能为力，需要 OCR</td></tr>
+      <tr><td>对象存储（S3 协议）</td><td>本地磁盘</td><td>无状态部署、可切换到云厂商；强制 path-style 访问避免桶名进域名导致的 DNS 问题</td><td>多一个组件；删除时需要处理“数据库删了、文件没删掉”的补偿</td></tr>
+      <tr><td>SSE（RAG 问答）</td><td>WebSocket</td><td>单向推送，基于 HTTP，易于穿过代理</td><td>需要关闭代理缓冲，否则打字机效果会变成成批输出</td></tr>
+      <tr><td>WebSocket + 服务端中转音频（语音面试）</td><td>WebRTC、端到端语音模型</td><td>实现简单，服务端可以统一做回声过滤、上下文管理和计量</td><td>音频多一跳，端到端延迟偏高；README 已把 WebRTC 列为待办</td></tr>
+      <tr><td>Prompt 模板文件（StringTemplate）</td><td>硬编码字符串</td><td>Prompt 与代码分离，便于迭代和审查</td><td>模板语法用 <code>{}</code>，写 JSON 示例或误用 <code>&lt;var&gt;</code> 时容易出错（项目里两种问题都出现过）</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="deployment">部署拓扑</h2>
+<p>根目录的 <code>docker-compose.yml</code> 编排 6 个服务，依赖关系用健康检查串起来：</p>
+<ul>
+  <li><strong>postgres</strong>：<code>pgvector/pgvector:pg16</code> 镜像，首次启动执行 <code>init.sql</code> 创建 vector 扩展，<code>pg_isready</code> 做健康检查。</li>
+  <li><strong>redis</strong>：<code>redis:7</code>，<code>redis-cli ping</code> 健康检查。</li>
+  <li><strong>minio</strong> 与 <strong>createbuckets</strong>：后者是一个“初始化容器”，等 MinIO 健康后用 <code>mc</code> 幂等地创建桶，完成后退出。</li>
+  <li><strong>app</strong>：多阶段构建。第一阶段在 JDK 25 镜像里先只复制 Gradle 配置并预下载依赖（利用镜像层缓存），再复制源码执行 <code>bootJar</code>；第二阶段只把 jar 拷进 JRE 镜像。它等待前面四个服务都“健康”或“成功完成”才启动。</li>
+  <li><strong>frontend</strong>：Node 构建后放进 Nginx。Nginx 配置了单页应用的 <code>try_files</code> 回退、<code>/api</code> 反代（读写超时 300 秒，匹配大模型的长耗时）、50MB 请求体上限和 gzip。</li>
+</ul>
+<p>本地开发用 <code>docker-compose.dev.yml</code> 只起 PostgreSQL、Redis、RustFS 三个依赖，后端用 <code>./gradlew :app:bootRun</code> 运行。<code>build.gradle</code> 里写了一段逻辑，把根目录 <code>.env</code> 逐行读进 bootRun 的环境变量，同时把 JVM 的文件与控制台编码固定为 UTF-8（解决 Windows 下中文日志乱码）。后端启动时还会检查对象存储桶，不存在就创建，409 冲突视为已被其他进程创建。</p>
+<p>设置页修改的聊天 / 向量 Provider 保存在数据库里，API Key 加密存储。语音服务（ASR/TTS）的配置走的是另一条路：修改后立即改写内存中的配置对象并热加载语音服务，同时写入 <code>~/.interview-guide/</code> 下的 YAML 和 env 文件。但应用启动时并不读取这两个文件，所以重启后语音配置会回到 <code>application.yml</code> 的值，而 DashScope Key 却以明文留在了 env 文件里。启动时会检查这两个路径的父目录是否可写，不可写直接启动失败。</p>
+<div class="callout risk">
+  <span class="label">部署上的缺口</span>
+  <p>语音 WebSocket 地址由后端拼成 <code>ws://localhost:8080/...</code> 返回给前端，Nginx 也没有配置 <code>/ws</code> 的 Upgrade 代理，所以远程部署时语音面试连不上；<code>/api</code> 反代没有关闭 <code>proxy_buffering</code>，SSE 流式回答会被 Nginx 攒批。另外项目没有登录和多用户体系（语音会话的用户 ID 固定为 <code>default</code>）。这些都是“如果上线你会怎么改”的好素材。</p>
+</div>
+
+<h2 id="config">配置体系</h2>
+<p><code>application.yml</code> 里几乎每个可调参数都写成 <code>${环境变量:默认值}</code> 的形式，敏感信息只放在 <code>.env</code>。主要分组：</p>
+<ul>
+  <li><strong>spring.*</strong>：开启虚拟线程；数据源；JPA 只做校验；Flyway 开启并允许对已有库打基线；上传上限 50MB（简历的 10MB 限制在业务层判断）；Redisson 连接池 64、最小空闲 10；<code>spring.ai.retry.max-attempts: 1</code> 关闭框架自带重试；pgvector 使用 HNSW、余弦距离、1024 维，并且不让 Spring AI 自己建表。</li>
+  <li><strong>app.ai.*</strong>：默认聊天与向量 Provider、各 Provider 的地址、模型和 Key、加密密钥要求、Advisor 开关（工具调用、会话记忆、日志、SafeGuard）、结构化输出的重试策略、RAG 的改写开关和按问题长度划分的 TopK 与相似度阈值。</li>
+  <li><strong>app.interview.*</strong>：每道主问题的追问数（默认 1）、评估分批大小（默认 8）。</li>
+  <li><strong>app.voice-interview.*</strong>：阶段时长、Qwen3 ASR/TTS 参数（采样率、静音断句阈值 2000ms、音色）、流式推送节奏、TTS 并发与超时、开场音频预热开关。</li>
+  <li><strong>management.*</strong>：暴露 health、info、metrics、prometheus 端点，并开启存活/就绪探针。</li>
+</ul>
+<p>这些配置都绑定到 <code>@ConfigurationProperties</code> 类（例如 <code>LlmProviderProperties</code>、<code>VoiceInterviewProperties</code>、<code>KnowledgeBaseQueryProperties</code>），代码里拿到的是强类型对象。</p>
+
+<h2 id="observability">可观测性</h2>
+<p>除了 Actuator 自带的 JVM、HTTP、连接池指标，项目自己埋了两组业务指标，都通过 Micrometer 注册，可以被 Prometheus 抓取：</p>
+<ul>
+  <li><strong>结构化输出</strong>：<code>app.ai.structured_output.invocations</code>、<code>attempts</code>、<code>latency</code>，标签是调用场景（如“简历分析”“批次评估”）和成功/失败。场景名先规范化成小写下划线并限制 48 个字符，避免标签基数失控。</li>
+  <li><strong>语音面试</strong>：大模型首 token 延迟、大模型总耗时、TTS 耗时、ASR 合并等待时间、单轮总耗时、轮次成功/失败计数、TTS 空音频计数。这些是调优语音延迟的依据。</li>
+</ul>
+<p>缺少的部分：没有链路追踪，日志不是结构化格式，异步任务的积压量（Stream 长度、pending 数）没有暴露成指标。如果被问“怎么监控这个系统”，可以从这三点展开。</p>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="index.html"><span class="dir">上一页</span><span class="ttl">项目总览</span></a>
+      <a class="next" href="ai-foundation.html"><span class="dir">下一页</span><span class="ttl">AI 工程底座</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>
