@@ -1,0 +1,226 @@
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 总览</p>
+  <h1>InterviewGuide 智能面试平台：一份基于源码的项目拆解</h1>
+  <p class="lead">一个 Spring Boot 4 + Java 25 + Spring AI 2.0 + React 18 的全栈 AI 应用，覆盖简历分析、文字与语音模拟面试、RAG 知识库问答、知识库题库面试、面试日程和多模型管理。本站按模块拆开它的设计取舍、可靠性手段和真实演进过程，再整理成面试可以直接使用的问答、简历写法，以及一条用 Claude Code 从零复刻它的路线。</p>
+  <div class="meta-row">
+    <span>源码基线：commit <span class="sha">b2d1ca0</span>（2026-08-14）</span>
+    <span>102 次提交 · 6 位贡献者</span>
+    <span>全站精读约 2–3 小时</span>
+  </div>
+</header>
+
+<h2 id="positioning">一句话定位</h2>
+<p>InterviewGuide 把“准备面试”拆成几个环节，并在每个环节用大模型替代人工：先让 AI 审简历，再按岗位方向或 JD 出题做模拟面试（可以打字，也可以实时语音对话），面试结束后异步生成评分报告；自己的学习资料上传成知识库后，既能做 RAG 问答，也能自动生成带参考答案和评分规则的题库，再从题库里抽题面试；最后用日历管理真实的面试安排。</p>
+<p>从工程角度看，它的价值不在功能数量，而在于怎么把“慢、贵、不稳定”的大模型调用变成一个可靠的产品：异步化、结构化输出重试、幂等、状态机、恢复调度、限流、Prompt 注入防御、实时语音链路里的并发与时序控制。这些正是面试里最容易被深挖、也最能拉开差距的部分。</p>
+
+<div class="callout pitch">
+  <span class="label">30 秒版本（面试开场可以直接用）</span>
+  <p>这是一个基于 Spring Boot 4 和 Spring AI 的 AI 面试训练平台，支持简历分析、文字和语音模拟面试、RAG 知识库问答和题库面试。后端用 PostgreSQL + pgvector 同时做业务库和向量库，用 Redis Stream 把简历分析、向量化、面试评估、题库生成这五类耗时任务异步化，并配了 pending 回收和定时恢复；大模型接入层支持多 Provider 热切换，结构化输出统一带修复型重试。我重点负责/深入研究的是（按你的实际情况填写）……</p>
+</div>
+
+<h2 id="facts">项目档案</h2>
+<dl class="facts">
+  <dt>形态</dt>
+  <dd>前后端分离：单体 Spring Boot 后端 + React 单页应用；开源协议 AGPL-3.0</dd>
+  <dt>后端</dt>
+  <dd>Spring Boot 4.1.0 · Java 25（开启虚拟线程）· Spring AI 2.0.0 · spring-ai-agent-utils 0.10.0 · Gradle 9.6.1（版本目录 <code>libs.versions.toml</code>）</dd>
+  <dt>数据与存储</dt>
+  <dd>PostgreSQL 16 + pgvector（1024 维，HNSW 索引，余弦距离）· Flyway 管理表结构，Hibernate 只做 <code>validate</code> · RustFS / MinIO（S3 协议）存原始文件</dd>
+  <dt>中间件</dt>
+  <dd>Redis 7 + Redisson 4.0：会话缓存、分布式锁、Stream 消息队列、Lua 限流</dd>
+  <dt>AI 能力</dt>
+  <dd>OpenAI 兼容协议接入 DashScope（通义）、DeepSeek、Kimi、GLM、LM Studio；DashScope SDK 接入 Qwen3 实时语音识别与合成（WebSocket）</dd>
+  <dt>文档处理</dt>
+  <dd>Apache Tika 2.9 解析 PDF / DOC / DOCX / TXT / Markdown · iText 8 导出 PDF（内嵌中文字体）</dd>
+  <dt>前端</dt>
+  <dd>React 18.3 · TypeScript 5.6 · Vite 5 · Tailwind CSS 4 · React Router 7 · react-virtuoso · react-big-calendar · Recharts</dd>
+  <dt>规模</dt>
+  <dd>后端 197 个 Java 文件约 2.5 万行；前端 85 个 TS/TSX 文件约 1.8 万行；36 个测试类约 8 千行；17 个 Prompt 模板；10 个面试方向 Skill；16 张表；5 条异步任务管线</dd>
+  <dt>部署</dt>
+  <dd>Docker Compose 一键启动 6 个服务（前端 Nginx、后端、PostgreSQL、Redis、MinIO、建桶初始化任务）；GitHub Actions 跑前后端测试与构建</dd>
+</dl>
+
+<h2 id="features">功能地图</h2>
+<p>下表按“用户能做什么”和“背后用了什么”对照，最后一列是本站对应的深入章节。</p>
+<div class="table-wrap wide">
+  <table>
+    <thead>
+      <tr><th>模块</th><th>用户能做什么</th><th>关键技术</th><th>深入阅读</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>简历管理</td>
+        <td>上传简历，异步得到五维评分、优势与逐条改进建议，导出 PDF 报告</td>
+        <td>Tika 内容识别与解析、SHA-256 去重、Redis Stream、结构化输出</td>
+        <td><a href="modules.html#resume">业务模块 · 简历</a></td>
+      </tr>
+      <tr>
+        <td>文字模拟面试</td>
+        <td>选择方向、难度、题量，或粘贴 JD；AI 出主问题和追问，逐题作答，交卷后异步生成报告</td>
+        <td>Skill 出题、并行生成与降级、幂等创建、Redis 会话缓存、统一评估</td>
+        <td><a href="modules.html#text-interview">业务模块 · 文字面试</a></td>
+      </tr>
+      <tr>
+        <td>语音模拟面试</td>
+        <td>与 AI 面试官实时语音对话，看实时字幕，可暂停后继续</td>
+        <td>WebSocket、Qwen3 实时 ASR/TTS、句子级并发合成、回声防护</td>
+        <td><a href="voice.html">语音面试</a></td>
+      </tr>
+      <tr>
+        <td>知识库与问答助手</td>
+        <td>上传学习资料，异步向量化后多知识库流式问答，会话可置顶</td>
+        <td>pgvector、查询改写、按问题长度调整检索阈值、SSE 流式输出</td>
+        <td><a href="modules.html#rag">业务模块 · RAG</a></td>
+      </tr>
+      <tr>
+        <td>知识库题库与面试</td>
+        <td>从资料生成带参考答案、评分规则和追问的题库，维护后按容量严格抽题面试</td>
+        <td>任务状态机、taskId 围栏、行锁、容量矩阵、复用评估引擎</td>
+        <td><a href="modules.html#kb-interview">业务模块 · 题库面试</a></td>
+      </tr>
+      <tr>
+        <td>面试日程</td>
+        <td>粘贴飞书、腾讯会议、Zoom 邀约文本，自动识别公司、岗位、时间和链接，日历管理</td>
+        <td>正则规则优先、大模型兜底、定时任务改状态</td>
+        <td><a href="modules.html#schedule">业务模块 · 日程</a></td>
+      </tr>
+      <tr>
+        <td>系统设置</td>
+        <td>增删 Provider、测试连通性、切换默认聊天与向量模型、配置语音服务</td>
+        <td>AES-GCM 加密 Key、SSRF 防护、读写锁、配置热加载</td>
+        <td><a href="modules.html#settings">业务模块 · 设置</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="big-picture">三种交互方式</h2>
+<p>整个系统的请求可以归成三类，理解了这三类，大部分设计就能对上号：同步请求只做快且确定的事；凡是要调大模型并且结果不必立刻拿到的，都走异步任务；必须边生成边展示的，走流式通道。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 372" role="img" aria-label="三种交互方式：同步请求直达数据库；异步任务先落库再写入 Redis Stream，由消费者调用大模型并回写状态，前端轮询；流式交互通过 SSE 或 WebSocket 持续推送。">
+      <defs>
+        <marker id="ix-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="ix-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+      </defs>
+      <text class="dg-z" x="20" y="22">同步请求 · CRUD 与查询</text>
+      <rect class="dg-box plain" x="20" y="34" width="150" height="62" rx="8"/>
+      <text class="dg-t" x="95" y="60" text-anchor="middle">浏览器</text>
+      <text class="dg-s" x="95" y="80" text-anchor="middle">React SPA</text>
+      <rect class="dg-box" x="240" y="34" width="190" height="62" rx="8"/>
+      <text class="dg-t" x="335" y="60" text-anchor="middle">Controller → Service</text>
+      <text class="dg-s" x="335" y="80" text-anchor="middle">校验 · 限流注解 · 小事务</text>
+      <rect class="dg-box" x="500" y="34" width="180" height="62" rx="8"/>
+      <text class="dg-t" x="590" y="60" text-anchor="middle">PostgreSQL / Redis</text>
+      <text class="dg-s" x="590" y="80" text-anchor="middle">业务表 · 会话缓存</text>
+      <line class="dg-line" x1="170" y1="56" x2="238" y2="56" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="204" y="49" text-anchor="middle">/api</text>
+      <line class="dg-line dash" x1="240" y1="78" x2="172" y2="78" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="204" y="92" text-anchor="middle">Result&lt;T&gt;</text>
+      <line class="dg-line" x1="430" y1="65" x2="498" y2="65" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="464" y="58" text-anchor="middle">读写</text>
+      <text class="dg-s" x="750" y="60">统一 HTTP 200 + 业务码</text>
+      <text class="dg-s" x="750" y="80">错误由前端拦截器统一提示</text>
+
+      <text class="dg-z" x="20" y="142">异步任务 · 简历分析 / 向量化 / 评估 / 出题</text>
+      <rect class="dg-box plain" x="20" y="154" width="150" height="62" rx="8"/>
+      <text class="dg-t" x="95" y="180" text-anchor="middle">浏览器</text>
+      <text class="dg-s" x="95" y="200" text-anchor="middle">立即拿到 PENDING</text>
+      <rect class="dg-box" x="240" y="154" width="190" height="62" rx="8"/>
+      <text class="dg-t" x="335" y="180" text-anchor="middle">Service</text>
+      <text class="dg-s" x="335" y="200" text-anchor="middle">落库 PENDING，提交后投递</text>
+      <rect class="dg-box accent" x="500" y="154" width="180" height="62" rx="8"/>
+      <text class="dg-t" x="590" y="180" text-anchor="middle">Redis Stream</text>
+      <text class="dg-s" x="590" y="200" text-anchor="middle">5 条管线 · 消费者组</text>
+      <rect class="dg-box" x="750" y="154" width="190" height="62" rx="8"/>
+      <text class="dg-t" x="845" y="180" text-anchor="middle">消费者线程</text>
+      <text class="dg-s" x="845" y="200" text-anchor="middle">调大模型 → 回写状态</text>
+      <line class="dg-line" x1="170" y1="172" x2="238" y2="172" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="204" y="165" text-anchor="middle">提交</text>
+      <line class="dg-line dash" x1="170" y1="200" x2="238" y2="200" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="204" y="214" text-anchor="middle">每 3 秒轮询</text>
+      <line class="dg-line accent" x1="430" y1="185" x2="498" y2="185" marker-end="url(#ix-b)"/>
+      <text class="dg-lbl accent" x="464" y="178" text-anchor="middle">XADD</text>
+      <line class="dg-line accent" x1="680" y1="185" x2="748" y2="185" marker-end="url(#ix-b)"/>
+      <text class="dg-lbl accent" x="714" y="178" text-anchor="middle">XREADGROUP</text>
+
+      <text class="dg-z" x="20" y="262">流式交互 · RAG 问答（SSE）与语音面试（WebSocket）</text>
+      <rect class="dg-box plain" x="20" y="274" width="150" height="62" rx="8"/>
+      <text class="dg-t" x="95" y="300" text-anchor="middle">浏览器</text>
+      <text class="dg-s" x="95" y="320" text-anchor="middle">fetch 读流 / WS</text>
+      <rect class="dg-box" x="240" y="274" width="190" height="62" rx="8"/>
+      <text class="dg-t" x="335" y="300" text-anchor="middle">SSE 接口 / WS Handler</text>
+      <text class="dg-s" x="335" y="320" text-anchor="middle">Flux · 虚拟线程管线</text>
+      <rect class="dg-box" x="500" y="274" width="180" height="62" rx="8"/>
+      <text class="dg-t" x="590" y="300" text-anchor="middle">检索 / 语音识别</text>
+      <text class="dg-s" x="590" y="320" text-anchor="middle">pgvector · Qwen3 ASR</text>
+      <rect class="dg-box" x="750" y="274" width="190" height="62" rx="8"/>
+      <text class="dg-t" x="845" y="300" text-anchor="middle">大模型流式输出</text>
+      <text class="dg-s" x="845" y="320" text-anchor="middle">逐句送 TTS 合成</text>
+      <line class="dg-line" x1="172" y1="305" x2="238" y2="305" marker-start="url(#ix-a)" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="204" y="297" text-anchor="middle">持续推送</text>
+      <line class="dg-line" x1="430" y1="305" x2="498" y2="305" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="464" y="297" text-anchor="middle">问题 / PCM</text>
+      <line class="dg-line" x1="680" y1="305" x2="748" y2="305" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="714" y="297" text-anchor="middle">上下文</text>
+      <path class="dg-line dash" d="M845,336 L845,356 L335,356 L335,338" marker-end="url(#ix-a)"/>
+      <text class="dg-lbl" x="590" y="360" text-anchor="middle">文本分片 / 字幕 / 音频块回推</text>
+    </svg>
+  </div>
+  <figcaption>同一个后端承载三种交互。异步任务那一行是整个项目可靠性设计的核心：请求线程只负责落库和投递，慢调用放到 Redis Stream 的消费者里做，前端靠轮询状态字段拿结果。</figcaption>
+</figure>
+
+<h2 id="highlights">最值得讲的技术点</h2>
+<p>如果面试只有十分钟讲项目，从下面挑两到三个最熟的讲深，比把功能列表念一遍有用得多。每一条都对应源码里真实存在的实现和提交记录。</p>
+<ul>
+  <li><strong>多模型注册表与三种调用配方</strong>：Provider 配置存数据库（Key 用 AES-GCM 加密），按“默认 / 纯净 / 语音”三种 ChatClient 缓存，底层模型实例按 Provider 共享，设置页修改后热加载。见 <a href="ai-foundation.html#registry">AI 底座</a>。</li>
+  <li><strong>结构化输出的统一重试</strong>：所有需要 JSON 的调用走同一个执行器，失败后把上次的错误原因截断后注入“修复型提示词”再试，还能在本地修复未转义的引号。见 <a href="ai-foundation.html#structured-output">AI 底座</a>。</li>
+  <li><strong>Redis Stream 异步模板</strong>：生产者、消费者用模板方法抽象，五条管线共用；消费前先回收超时的 pending 消息，失败重新入队最多 3 次，再加定时恢复任务兜底。见 <a href="reliability.html#stream-template">可靠性</a>。</li>
+  <li><strong>题库生成状态机</strong>：taskId 当围栏令牌，状态迁移全部在行锁内做比较再更新，旧任务的结果直接丢弃，新题替换和“完成”状态在同一个事务里提交。见 <a href="reliability.html#state-machine">可靠性</a>。</li>
+  <li><strong>多维限流的原子性</strong>：一个接口上叠加全局、IP、用户多条规则，一次 Lua 调用里先只读检查全部维度，全部通过才统一扣减。见 <a href="reliability.html#rate-limit">可靠性</a>。</li>
+  <li><strong>刷新不重复出题</strong>：幂等键放在 URL 里，后端用分布式锁、Redis 结果映射和数据库唯一索引三层保证同一个请求只生成一次题目。见 <a href="reliability.html#idempotency">可靠性</a>。</li>
+  <li><strong>向量化的影子写入</strong>：重新向量化时新向量先带临时标记写入，检索看不到；全部成功后在一个事务里删旧、提升新，失败只清理临时数据。见 <a href="modules.html#vector-shadow">业务模块</a>。</li>
+  <li><strong>实时语音链路</strong>：手动提交代替自动断句、三层回声防护、迟到字幕隔离、LLM 流式输出按句切分并发合成、按序号有序下发音频。见 <a href="voice.html">语音面试</a>。</li>
+  <li><strong>Prompt 注入三层防御</strong>：输入净化加随机分隔符、系统提示词声明数据边界、请求前 SafeGuard 关键词闸门，外加“模型输出只当数据用”。见 <a href="ai-foundation.html#prompt-injection">AI 底座</a>。</li>
+</ul>
+
+<h2 id="how-to-read">怎么读这个站</h2>
+<div class="split">
+  <div>
+    <h4>明天就面试（约 40 分钟）</h4>
+    <p class="small">本页 → <a href="resume.html">简历与讲述</a>（照着改简历、背讲述脚本）→ <a href="interview-qa.html">面试问答</a> 前 20 题 → <a href="quality.html#findings">代码审查发现</a>（准备“你会怎么改进”）。</p>
+  </div>
+  <div>
+    <h4>系统准备（约半天）</h4>
+    <p class="small">按顶部导航顺序读完“项目解析”七页，每页读完合上电脑复述一遍图里的流程，再用问答页的自测模式检查。</p>
+  </div>
+  <div>
+    <h4>想自己动手改</h4>
+    <p class="small"><a href="quality.html">质量与问题</a> 列出了可以直接动手修的缺陷；<a href="vibe-coding.html">Claude Code 复刻</a> 给出了用 AI 编码工具推进的完整方法。</p>
+  </div>
+  <div>
+    <h4>面 AI 应用开发岗</h4>
+    <p class="small">重点读 <a href="ai-foundation.html">AI 底座</a>、<a href="modules.html#rag">RAG</a>、<a href="voice.html">语音面试</a>，以及问答页的“大模型工程”分组。</p>
+  </div>
+</div>
+
+<h2 id="pages">页面索引</h2>
+<div class="cards">
+  <a class="card" href="architecture.html"><span class="card-kicker">项目解析</span><span class="card-title">整体架构与技术选型</span><span class="card-desc">分层、请求生命周期、16 张表、选型取舍、部署与配置</span></a>
+  <a class="card" href="ai-foundation.html"><span class="card-kicker">项目解析</span><span class="card-title">AI 工程底座</span><span class="card-desc">多模型注册表、结构化输出、Prompt 与注入防御、Skill 出题、统一评估</span></a>
+  <a class="card" href="reliability.html"><span class="card-kicker">项目解析</span><span class="card-title">异步、一致性与限流</span><span class="card-desc">Redis Stream 模板、状态机、幂等、缓存、Lua 限流、事务边界</span></a>
+  <a class="card" href="modules.html"><span class="card-kicker">项目解析</span><span class="card-title">业务模块逐个拆解</span><span class="card-desc">简历、文字面试、RAG、题库面试、日程、设置</span></a>
+  <a class="card" href="voice.html"><span class="card-kicker">项目解析</span><span class="card-title">实时语音面试链路</span><span class="card-desc">从麦克风到扬声器的完整时序与每一个坑</span></a>
+  <a class="card" href="frontend.html"><span class="card-kicker">项目解析</span><span class="card-title">前端工程实现</span><span class="card-desc">API 层、SSE 客户端、音频采集与播放、轮询、测试</span></a>
+  <a class="card" href="quality.html"><span class="card-kicker">项目解析</span><span class="card-title">测试、CI 与代码审查</span><span class="card-desc">测试策略、TDD 证据、18 条审查发现与修复建议</span></a>
+  <a class="card" href="interview-qa.html"><span class="card-kicker">面试准备</span><span class="card-title">面试高频问答</span><span class="card-desc">按主题分组的追问与参考回答，支持自测模式</span></a>
+  <a class="card" href="resume.html"><span class="card-kicker">面试准备</span><span class="card-title">简历写法与讲述脚本</span><span class="card-desc">简历条目、STAR 故事、1/3/10 分钟讲法、质疑应对</span></a>
+  <a class="card" href="vibe-coding.html"><span class="card-kicker">AI 编码</span><span class="card-title">用 Claude Code 从零构建</span><span class="card-desc">仓库里的 AI 协作证据、上下文工程、分阶段路线与提示词</span></a>
+</div>
+
+<h2 id="about">关于这份拆解</h2>
+<p>写作依据是完整阅读仓库源码（后端、前端、测试、配置、迁移脚本、Prompt、Skill 文件）、全部 102 条提交说明、<code>.claude/tdd</code> 下的 4 份 TDD 证据文档和 <code>docs/testing</code> 下的 2 份测试记录。文中提到的类名、配置项和数值都以 commit <span class="sha">b2d1ca0</span> 为准；提交号用虚线框标出，方便你回到仓库核对。</p>
+<div class="callout risk">
+  <span class="label">诚实使用</span>
+  <p>InterviewGuide 是公开的开源项目（原作者 Guide，AGPL-3.0），不少同学拿它做项目经历，面试官很可能见过。把它写进简历时，要讲清楚你自己的理解、改动和取舍，不要把全部设计说成独立完成。<a href="resume.html#honesty">简历与讲述</a> 一页专门讲了怎么讲出差异化，<a href="quality.html#findings">代码审查发现</a> 里的问题可以作为你亲手改进的切入点。</p>
+</div>

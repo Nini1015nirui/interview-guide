@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>简历与讲述 · InterviewGuide 项目拆解</title>
+<meta name="description" content="简历条目示例、1/3/10 分钟讲述脚本、STAR 故事与被质疑时的应对。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html" aria-current="page">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">面试准备 · 简历与讲述</p>
+  <h1>简历写法与讲述脚本：把项目讲成你的项目</h1>
+  <p class="lead">这一页解决三个问题：简历上怎么写、面试时怎么讲（1 分钟、3 分钟、10 分钟三个版本和 4 个 STAR 故事）、被质疑时怎么接。所有内容都建立在一个前提上：讲你真正理解和做过的部分。</p>
+</header>
+
+<h2 id="honesty">先说原则：诚实与差异化</h2>
+<p>InterviewGuide 的 README 明确写着欢迎拿它做个人项目经历或毕设，这意味着同一个项目会出现在很多人的简历上，面试官见过的概率不低。在这种情况下，“照搬 README 的功能列表”是最差的写法：既没有区分度，又经不起追问。三条原则：</p>
+<ol class="steps">
+  <li><strong>角色如实</strong>：说清楚这是基于开源项目的学习与改进，还是从零实现。面试官问“这是开源项目吗”时能坦然回答，比被当场识破好得多。</li>
+  <li><strong>只讲吃透的部分</strong>：宁可深讲两个模块，也不要浅讲七个。本站每个模块都标了源码位置和提交号，讲之前自己在代码里走一遍。</li>
+  <li><strong>用改动建立差异</strong>：<a href="quality.html#findings">代码审查清单</a> 里的问题都是真实存在的。fork 仓库，挑几条按“失败测试 → 修复 → 回归”修掉并留下提交记录，这些才是完全属于你的内容，也是面试官最愿意追问的部分。</li>
+</ol>
+<div class="callout risk">
+  <span class="label">两条红线</span>
+  <p>不要把原作者和社区贡献者的设计说成是自己独立完成的，也不要编造没有测过的数据（QPS、并发数、时延提升百分比）。如果你把修改后的版本部署成对外服务，注意项目采用 AGPL-3.0 协议，需要公开修改后的源码。</p>
+</div>
+
+<h2 id="roles">先确定你的角色</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>你的实际情况</th><th>简历上的定位</th><th>讲述重点</th></tr></thead>
+    <tbody>
+      <tr><td>通读源码、本地跑通、做过实验</td><td>“基于开源项目 InterviewGuide 的学习与二次开发”</td><td>对关键设计的理解和取舍判断，以及你做过的实验（比如调检索阈值、压测）</td></tr>
+      <tr><td>在 fork 上修复了若干问题、补了测试</td><td>“参与 / 主导若干模块的改进”</td><td>你发现问题的过程、复现测试、修复方案和验证数据</td></tr>
+      <tr><td>在它的基础上加了新功能</td><td>“在开源项目基础上扩展 X 功能”</td><td>新功能的设计，如何复用已有的异步模板、评估引擎等底座</td></tr>
+      <tr><td>参考它从零实现了自己的版本</td><td>“独立设计实现的 AI 面试平台”</td><td>你的实现和原项目的差异，你做了哪些不同的选择、为什么</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="bullets">简历条目写法</h2>
+<p>写法遵循“动作 + 技术手段 + 解决的问题 + 结果”。下面三组示例按岗位方向组织，括号里的内容必须换成你自己的真实情况，数字要么来自你亲自测量，要么不写。</p>
+<h3 id="bullets-backend">Java 后端方向</h3>
+<div class="prompt">
+  <div class="prompt-head"><span>项目经历示例（后端）</span><button type="button" class="copy-btn" data-copy="resume-backend">复制</button></div>
+  <pre id="resume-backend">AI 智能面试平台（基于开源项目 InterviewGuide 二次开发）｜Spring Boot 4 · Java 25 · Spring AI 2.0 · PostgreSQL/pgvector · Redis · React
+- 基于 Redis Stream 消费者组实现简历分析、向量化、面试评估、题库生成等 5 条异步管线，模板方法统一领取、重试（最多 3 次）、pending 回收（XAUTOCLAIM）与失败状态回写，配合事务提交后投递避免“消息早于数据”。
+- 设计题库生成任务状态机：以 taskId 作为围栏令牌，在行锁内比较并迁移状态，旧任务结果自动丢弃；模型调用置于事务外，题目替换与完成状态在同一短事务内提交，并有定时任务恢复超时任务。
+- 通过 URL 幂等键 + Redisson 分布式锁 + Redis 结果映射 + 数据库唯一索引四层保障，解决页面刷新导致重复出题的问题。
+- 基于 Lua 脚本实现多维度（全局 / IP / 用户）原子限流：先只读校验全部维度、全部通过再统一扣减，使用 Testcontainers 验证多维回滚。
+- （你的改进，按实际填写）修复知识库删除因外键约束失败、重新生成覆盖已启用题目等问题，补充复现测试；修复测试配置并恢复容器级集成测试，使 CI 覆盖应用启动与 Flyway 迁移。</pre>
+</div>
+<h3 id="bullets-ai">AI 应用开发方向</h3>
+<div class="prompt">
+  <div class="prompt-head"><span>项目经历示例（AI 应用）</span><button type="button" class="copy-btn" data-copy="resume-ai">复制</button></div>
+  <pre id="resume-ai">AI 模拟面试与知识库问答平台｜Spring AI 2.0 · OpenAI 兼容多模型 · pgvector · Qwen3 实时 ASR/TTS
+- 设计多模型注册表：Provider 配置入库并以 AES-GCM 加密 API Key，按“默认 / 无工具 / 语音”三种配方缓存 ChatClient，支持设置页热切换聊天与向量模型。
+- 封装统一的结构化输出执行器：JSON Schema 校验 + 携带上次错误原因的修复型重试 + 本地引号修复，替代各业务分散的解析逻辑；评估按 8 题分批、二次汇总，批次失败局部降级。
+- 实现 Skill 驱动出题：按 ALWAYS_ONE / CORE / NORMAL 三阶段分配题量，按需注入参考题库，简历题与方向题 6:4 并行生成互为降级，用 10 字主题摘要做历史去重，控制上下文约 600 token。
+- RAG 问答支持多轮查询改写、按问题长度自适应 topK 与相似度阈值、无命中不调用模型、流式输出前 120 字拒答探测；向量化采用影子写入 + 事务内提升，失败不污染线上检索。
+- 实时语音面试：AudioWorklet 采集 16k PCM，LLM 流式输出按句切分并发合成（并发上限 3）、按序号有序下发，四层回声防护；定位并修复识别重连回调误删新连接、TTS 握手阻塞等问题。</pre>
+</div>
+<h3 id="bullets-fullstack">全栈方向</h3>
+<div class="prompt">
+  <div class="prompt-head"><span>项目经历示例（全栈）</span><button type="button" class="copy-btn" data-copy="resume-fullstack">复制</button></div>
+  <pre id="resume-fullstack">AI 智能面试平台｜React 18 · TypeScript · Vite · Spring Boot 4 · PostgreSQL · Redis
+- 前端实现基于 fetch + ReadableStream 的 SSE 客户端（支持 POST、行 / 事件两种解析模式、流内业务错误识别），配合 requestAnimationFrame + startTransition 合并流式渲染。
+- 统一 Axios 请求层消化“HTTP 200 + 业务码”约定，识别以 Blob 形式返回的错误结果；异步任务按状态条件轮询，状态展示逻辑抽为纯函数并用 node --test 覆盖。
+- 通过路由层生成幂等请求 ID、两次 replace 跳转与 useRef 防重入，配合后端幂等设计消除刷新与 StrictMode 导致的重复创建。
+- 使用 Playwright 注入假 WebSocket 与虚拟麦克风，编写语音面试端到端用例，覆盖迟到字幕隔离等时序问题。</pre>
+</div>
+<p class="small muted">不要把三组都写上。选和目标岗位最匹配的一组，保留 3–5 条，其中至少 1 条是你自己的改动。</p>
+
+<h2 id="scripts">讲述脚本</h2>
+<h3 id="script-1min">1 分钟版本（自我介绍里带过）</h3>
+<div class="callout pitch">
+  <span class="label">1 分钟</span>
+  <p>我最近深入做的一个项目是 AI 面试训练平台，基于 Spring Boot 4 和 Spring AI，能做简历分析、文字和语音模拟面试，以及基于知识库的问答和出题。我主要关注的是怎么把大模型这种慢、贵、不稳定的调用做成可靠的产品：耗时任务用 Redis Stream 异步化并配了重试和恢复，结构化输出统一做修复型重试，题库生成用 taskId 做围栏防止旧任务覆盖新结果。在这个基础上我（按实际填写：修复了哪些问题 / 加了什么功能），比如……。如果您感兴趣，我可以展开讲其中任何一块。</p>
+</div>
+<h3 id="script-3min">3 分钟版本（“介绍一下你的项目”）</h3>
+<ol class="steps">
+  <li><strong>背景与定位（20 秒）</strong>：做什么、给谁用、为什么要用大模型做。</li>
+  <li><strong>架构一句话（20 秒）</strong>：模块化单体，PostgreSQL 加 pgvector 同时做业务库和向量库，Redis 做缓存、锁、队列和限流；请求分同步、异步、流式三类。</li>
+  <li><strong>难点一（50 秒）</strong>：异步可靠性。Stream 模板怎么领取、重试、回收；为什么事务提交后才投递；题库状态机的 taskId 围栏。</li>
+  <li><strong>难点二（50 秒）</strong>：按岗位选。后端岗讲幂等和限流原子性；AI 岗讲结构化输出和 RAG 检索策略；全栈或音视频相关讲语音链路。</li>
+  <li><strong>你的贡献与结果（30 秒）</strong>：你修了什么、怎么验证的、效果如何。</li>
+  <li><strong>收尾（10 秒）</strong>：“这个项目让我对 LLM 应用的工程化有了比较完整的认识，也清楚它还有哪些不足，比如……”</li>
+</ol>
+<h3 id="script-10min">10 分钟版本（专门的项目深挖环节）</h3>
+<p>结构和 3 分钟版一样，但每个难点都按“问题 → 方案 → 取舍 → 验证”展开，并主动画图。建议提前练熟这四张图，面试时在白板或共享屏幕上边画边讲：</p>
+<ul>
+  <li>三种交互方式（<a href="index.html#big-picture">总览</a>）</li>
+  <li>Stream 消费者循环（<a href="reliability.html#stream-template">可靠性</a>）</li>
+  <li>题库状态机（<a href="reliability.html#state-machine">可靠性</a>）或向量影子写入（<a href="modules.html#vector-shadow">业务模块</a>）</li>
+  <li>语音一轮对话的时序（<a href="voice.html#sequence">语音面试</a>）</li>
+</ul>
+<p>10 分钟版本里一定要留出“不足与改进”的一段，主动讲两三条审查发现和你的处理，这会把谈话引向你最有准备的领域。</p>
+
+<h2 id="star">四个 STAR 故事</h2>
+<h3 id="star-state-machine">故事一：旧任务覆盖新结果</h3>
+<dl class="facts">
+  <dt>情境</dt>
+  <dd>知识库题库生成是异步任务，用户可以反复点“生成”。测试发现两个问题：首次消费失败后状态一直停在“生成中”；用户重新提交后，上一次还在跑的任务把旧结果写了进来。</dd>
+  <dt>任务</dt>
+  <dd>保证同一知识库任意时刻只有一个有效任务，旧任务的结果不能生效，失败能恢复，且不能在事务里调用模型。</dd>
+  <dt>行动</dt>
+  <dd>先写复现测试，13 个用例里 2 个按预期失败。然后引入 taskId 作为围栏令牌：每次提交生成新 ID，所有状态迁移都在行锁内比较 ID 和预期状态；模型调用在事务外，最后一个短事务再次核对后替换题目并标记完成；再加恢复调度处理超时任务，生成参数存快照。</dd>
+  <dt>结果</dt>
+  <dd>复现测试全部转绿，全量回归、前端构建、PostgreSQL 迁移和浏览器主流程都通过；前端只在同一任务完成时刷新列表，消除了“暂无题目”的假象。</dd>
+</dl>
+<h3 id="star-voice">故事二：第三轮起没有声音</h3>
+<dl class="facts">
+  <dt>情境</dt>
+  <dd>语音面试前两轮正常，从第三轮开始识别不再返回结果，偶发、难复现。</dd>
+  <dt>任务</dt>
+  <dd>找到根因并保证识别连接断开后能可靠恢复。</dd>
+  <dt>行动</dt>
+  <dd>通过日志发现云端识别连接会被服务端关闭，代码在发送失败时会重建连接。进一步发现旧连接的关闭回调是异步触发的，可能晚于新连接建立，而它按会话 ID 删除会话表里的记录，把新连接一起删了。修复为关闭回调只删除“对象身份与自己相同”的连接，并为同一会话的启停加锁；发送失败时自动重连并重发当前音频帧。</dd>
+  <dt>结果</dt>
+  <dd>问题不再出现。这个问题的本质是“异步回调按 key 修改共享状态时没有确认状态是否已被替换”，和乐观锁、CAS 要解决的是同一类问题。</dd>
+</dl>
+<h3 id="star-shadow">故事三：重新向量化失败导致知识库残缺</h3>
+<dl class="facts">
+  <dt>情境</dt>
+  <dd>早期重新向量化是“先删旧向量，再逐批写新向量”，中途某批 Embedding 调用失败，知识库就只剩一部分向量，问答质量骤降。</dd>
+  <dt>任务</dt>
+  <dd>让重新向量化要么完整成功、要么完全不影响现有数据，且过程中问答不中断。</dd>
+  <dt>行动</dt>
+  <dd>改为影子写入：新向量带临时知识库 ID 写入，对检索不可见；全部成功后在一个事务里删除旧向量并用 jsonb_set 把临时 ID 提升为正式 ID；失败时按任务 ID 清理临时数据。几十次 Embedding 调用都在事务外，事务里只有两条 SQL。</dd>
+  <dt>结果</dt>
+  <dd>失败不再污染线上检索，切换在一次提交内完成，并发的两个任务也不会新旧混杂。这个方案能成立的前提是业务库和向量库是同一个 PostgreSQL，这也是当初选 pgvector 的理由之一。</dd>
+</dl>
+<h3 id="star-fix">故事四：你自己的修复（模板）</h3>
+<p>这是最重要的一个故事，用你在 fork 上真实完成的修复来写。以“知识库删不掉”为例：</p>
+<dl class="facts">
+  <dt>情境</dt>
+  <dd>阅读源码时发现题目表对知识库的外键没有级联，而删除服务不删除题目，推断“生成过题库的知识库无法删除”。</dd>
+  <dt>任务</dt>
+  <dd>先证实，再以最小改动修复，并防止回归。</dd>
+  <dt>行动</dt>
+  <dd>写一个集成测试：创建知识库和题目后调用删除，测试按预期因外键约束失败。修复为在删除事务里先批量删除题目（或新增迁移加级联），测试转绿，再跑全量回归。</dd>
+  <dt>结果</dt>
+  <dd>（按实际填写）提交记录、测试名称、PR 链接。面试时可以顺带讲：为什么选择在服务层删除而不是数据库级联（可见性、审计、与向量和文件的清理顺序一致）。</dd>
+</dl>
+
+<h2 id="skeptic">被质疑时怎么接</h2>
+<details class="qa" open>
+  <summary>“这不是 GitHub 上那个开源项目吗？”</summary>
+  <div class="qa-body">
+    <p>坦然承认，然后把话题引到你的理解和改动上：“是的，我是基于这个开源项目做的学习和二次开发。我读完了全部源码和提交记录，重点研究了异步任务和 RAG 两块，并且在自己的 fork 上修复了几个问题，比如……我可以讲讲其中一个是怎么发现和验证的。”</p>
+  </div>
+</details>
+<details class="qa" open>
+  <summary>“这么多功能，都是你一个人做的？”</summary>
+  <div class="qa-body">
+    <p>不要硬扛。“不是，整体框架来自开源项目，我负责 / 深入的是 A 和 B 两块。A 这块的难点是……”然后马上进入细节。面试官要判断的是你的深度，而不是项目的广度。</p>
+  </div>
+</details>
+<details class="qa" open>
+  <summary>“是不是用 AI 写的？”</summary>
+  <div class="qa-body">
+    <p>如实说用了哪些 AI 工具、怎么用的，并强调你负责的部分：定义问题和验收标准、设计关键方案、审查 AI 的改动、用测试证明结果。可以举仓库里的反例说明你知道 AI 会出什么错，比如它改坏了测试配置又把失败的测试禁用掉。详见 <a href="vibe-coding.html#talk">Claude Code 复刻 · 怎么谈 AI 辅助开发</a>。</p>
+  </div>
+</details>
+<details class="qa" open>
+  <summary>“你说的这个优化，有数据吗？”</summary>
+  <div class="qa-body">
+    <p>有就讲怎么测的（环境、方法、样本量）；没有就直说“这是设计层面的推理，我没有做过压测”，再讲你会怎么测。编造的数据一追问就露馅。</p>
+  </div>
+</details>
+<details class="qa" open>
+  <summary>“为什么不用 X（Kafka、Milvus、LangChain4j……）？”</summary>
+  <div class="qa-body">
+    <p>先讲当前选择在当前规模下的理由，再讲什么条件下会换成 X。例如：“Stream 在任务量小、已有 Redis 的前提下足够；需要回放、多个下游订阅或者堆积量很大时，我会换 Kafka。”这样回答既不否定对方，也体现了判断力。</p>
+  </div>
+</details>
+
+<h2 id="differentiation">让这个项目真正属于你</h2>
+<ul>
+  <li><strong>修问题</strong>：从 <a href="quality.html#fix-plan">修复顺序建议</a> 里挑 3–5 条，每条一个 PR，带复现测试和验证说明。</li>
+  <li><strong>补评测</strong>：为出题、评估或 RAG 建一个小评测集，改一次 Prompt 或阈值就跑一次，把结果做成表格。这在 AI 应用岗面试里非常加分。</li>
+  <li><strong>补指标</strong>：给语音链路加“首句音频到达浏览器”的时延，给模型调用加 token 和费用统计，截图放进你的博客。</li>
+  <li><strong>部署上线</strong>：修好 WebSocket 地址和 Nginx 配置，加上登录，部署到云服务器，面试时可以现场演示。</li>
+  <li><strong>写出来</strong>：把一两个故事写成技术博客，本站的结构可以直接借用。</li>
+</ul>
+
+<h2 id="checklist">面试前一晚的检查清单</h2>
+<ol class="steps">
+  <li>能在 1 分钟和 3 分钟内讲完项目，不看稿。</li>
+  <li>能不看资料画出四张图：三种交互、消费者循环、状态机、语音时序。</li>
+  <li>准备好 2 个 STAR 故事，其中 1 个是你自己的修复。</li>
+  <li>把 <a href="interview-qa.html">问答页</a> 前 20 题用自测模式过一遍。</li>
+  <li>准备好“项目的三个不足”和“如果重做会怎么改”。</li>
+  <li>打开自己的 fork，确认能随时展示提交记录和测试。</li>
+</ol>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="interview-qa.html"><span class="dir">上一页</span><span class="ttl">面试高频问答</span></a>
+      <a class="next" href="vibe-coding.html"><span class="dir">下一页</span><span class="ttl">用 Claude Code 从零构建</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>

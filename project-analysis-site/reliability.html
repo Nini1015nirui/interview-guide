@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>可靠性 · InterviewGuide 项目拆解</title>
+<meta name="description" content="Redis Stream 异步模板、题库生成状态机、幂等创建、缓存、多维 Lua 限流与事务边界。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html" aria-current="page">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 可靠性</p>
+  <h1>异步、一致性与限流：把慢且不可靠的调用管住</h1>
+  <p class="lead">一次大模型调用动辄十几秒，还会失败、超时；进程会重启；用户会刷新、会重复点击。这个项目用一套 Redis Stream 异步模板、几个带围栏的状态机、分层的幂等手段和一段 Lua 脚本，把这些不确定性收拢起来。这一页是面试里“深挖项目”环节最容易被追问的部分。</p>
+</header>
+
+<h2 id="failure-modes">要应对的失败模式</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>会发生什么</th><th>项目里的应对</th><th>细节</th></tr></thead>
+    <tbody>
+      <tr><td>模型调用太慢，HTTP 请求超时</td><td>异步化</td><td>请求线程只落库和投递，结果通过状态字段轮询</td></tr>
+      <tr><td>消费者处理到一半进程崩溃</td><td>pending 回收</td><td>消息未 ACK 会留在 pending 列表，空闲超过 5 分钟被重新认领</td></tr>
+      <tr><td>投递到 Redis 失败</td><td>失败即落状态 + 定时恢复</td><td>生产者在独立事务里把状态改成 FAILED；题库和语音评估还有调度器重投</td></tr>
+      <tr><td>同一消息被处理两次</td><td>跳过已完成 + 原子领取</td><td>消费前检查实体状态；题库生成用行锁比较后更新</td></tr>
+      <tr><td>旧任务的结果覆盖新任务</td><td>taskId 围栏</td><td>每次提交生成新 taskId，写结果前在锁内核对</td></tr>
+      <tr><td>刷新页面重复出题</td><td>幂等键</td><td>URL 带请求 ID，后端锁 + 结果映射 + 唯一索引</td></tr>
+      <tr><td>接口被刷</td><td>多维限流</td><td>全局 / IP / 用户多条规则一次 Lua 原子判定</td></tr>
+      <tr><td>长事务里调外部服务</td><td>事务边界规则</td><td>大模型、S3、HTTP 调用一律放在事务外</td></tr>
+      <tr><td>重建数据时失败，旧数据已被删</td><td>影子写入再提升</td><td>向量化先写临时数据，成功后同一事务内替换</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="stream-template">Redis Stream 异步模板</h2>
+<p>五条异步管线（简历分析、知识库向量化、文字面试评估、语音面试评估、知识库题库生成）共用两个模板基类。子类只需要实现十来个小方法：Stream 名称、消费者组、如何解析消息、如何标记处理中 / 完成 / 失败、如何重试。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 310" role="img" aria-label="消费者循环：先回收空闲超过 5 分钟的 pending 消息，没有再阻塞读取新消息；每条消息依次解析、检查是否已删除或已完成、原子领取、执行业务、标记完成并 ACK；解析失败、已完成、未领到都直接 ACK；业务异常时重试次数小于 3 则重新入队，否则标记失败，两种情况都 ACK 原消息。">
+      <defs>
+        <marker id="sc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="sc-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+        <marker id="sc-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+      </defs>
+      <path class="dg-line dash" d="M885,52 L885,20 L116,20 L116,50" marker-end="url(#sc-a)"/>
+      <text class="dg-lbl" x="500" y="16" text-anchor="middle">处理完继续下一轮循环（单线程）</text>
+
+      <rect class="dg-box accent" x="16" y="52" width="200" height="60" rx="8"/>
+      <text class="dg-t" x="116" y="76" text-anchor="middle">取消息</text>
+      <text class="dg-s" x="116" y="96" text-anchor="middle">先 XAUTOCLAIM，再 XREADGROUP</text>
+      <rect class="dg-box" x="246" y="52" width="110" height="60" rx="8"/>
+      <text class="dg-t" x="301" y="76" text-anchor="middle">解析</text>
+      <text class="dg-s" x="301" y="96" text-anchor="middle">字段齐全？</text>
+      <rect class="dg-box" x="386" y="52" width="130" height="60" rx="8"/>
+      <text class="dg-t" x="451" y="76" text-anchor="middle">shouldSkip</text>
+      <text class="dg-s" x="451" y="96" text-anchor="middle">已删除或已完成？</text>
+      <rect class="dg-box" x="546" y="52" width="110" height="60" rx="8"/>
+      <text class="dg-t" x="601" y="76" text-anchor="middle">领取</text>
+      <text class="dg-s" x="601" y="96" text-anchor="middle">标记 PROCESSING</text>
+      <rect class="dg-box" x="686" y="52" width="110" height="60" rx="8"/>
+      <text class="dg-t" x="741" y="76" text-anchor="middle">执行业务</text>
+      <text class="dg-s" x="741" y="96" text-anchor="middle">调用大模型等</text>
+      <rect class="dg-box good" x="826" y="52" width="118" height="60" rx="8"/>
+      <text class="dg-t" x="885" y="76" text-anchor="middle">标记完成</text>
+      <text class="dg-s" x="885" y="96" text-anchor="middle">然后 ACK</text>
+
+      <line class="dg-line" x1="216" y1="82" x2="244" y2="82" marker-end="url(#sc-a)"/>
+      <line class="dg-line" x1="356" y1="82" x2="384" y2="82" marker-end="url(#sc-a)"/>
+      <line class="dg-line" x1="516" y1="82" x2="544" y2="82" marker-end="url(#sc-a)"/>
+      <line class="dg-line" x1="656" y1="82" x2="684" y2="82" marker-end="url(#sc-a)"/>
+      <line class="dg-line accent" x1="796" y1="82" x2="824" y2="82" marker-end="url(#sc-c)"/>
+
+      <rect class="dg-box plain" x="246" y="160" width="110" height="44" rx="8"/>
+      <text class="dg-t" x="301" y="187" text-anchor="middle">ACK 丢弃</text>
+      <rect class="dg-box plain" x="386" y="160" width="130" height="44" rx="8"/>
+      <text class="dg-t" x="451" y="187" text-anchor="middle">ACK 跳过</text>
+      <rect class="dg-box plain" x="546" y="160" width="110" height="44" rx="8"/>
+      <text class="dg-t" x="601" y="187" text-anchor="middle">ACK 不处理</text>
+      <line class="dg-line" x1="301" y1="112" x2="301" y2="158" marker-end="url(#sc-a)"/>
+      <text class="dg-lbl" x="308" y="139">失败</text>
+      <line class="dg-line" x1="451" y1="112" x2="451" y2="158" marker-end="url(#sc-a)"/>
+      <text class="dg-lbl" x="458" y="139">是</text>
+      <line class="dg-line" x1="601" y1="112" x2="601" y2="158" marker-end="url(#sc-a)"/>
+      <text class="dg-lbl" x="608" y="139">未领到</text>
+
+      <rect class="dg-box warn" x="686" y="160" width="110" height="44" rx="8"/>
+      <text class="dg-t" x="741" y="187" text-anchor="middle">重试 &lt; 3 ？</text>
+      <line class="dg-line warn" x1="741" y1="112" x2="741" y2="158" marker-end="url(#sc-w)"/>
+      <text class="dg-lbl warn" x="748" y="139">异常</text>
+      <rect class="dg-box" x="686" y="242" width="110" height="56" rx="8"/>
+      <text class="dg-t" x="741" y="265" text-anchor="middle">重新 XADD</text>
+      <text class="dg-s" x="741" y="284" text-anchor="middle">次数 +1，ACK 原消息</text>
+      <line class="dg-line warn" x1="741" y1="204" x2="741" y2="240" marker-end="url(#sc-w)"/>
+      <text class="dg-lbl warn" x="748" y="227">是</text>
+      <rect class="dg-box bad" x="826" y="160" width="118" height="44" rx="8"/>
+      <text class="dg-t" x="885" y="187" text-anchor="middle">标记 FAILED</text>
+      <line class="dg-line warn" x1="796" y1="182" x2="824" y2="182" marker-end="url(#sc-w)"/>
+      <text class="dg-lbl warn" x="810" y="175" text-anchor="middle">否</text>
+    </svg>
+  </div>
+  <figcaption>不管走哪条分支，原消息最终都会被 ACK；只有进程在“执行业务”中途崩溃时消息才会留在 pending 列表，由下一轮的 XAUTOCLAIM 捡回来。重试不是“不 ACK 等回收”，而是重新入队一条带新次数的消息。</figcaption>
+</figure>
+<h3 id="producer">生产者</h3>
+<p><code>AbstractStreamProducer.sendTask</code> 做三件事：构造消息（字段全是字符串，重试次数从 0 开始）、以近似裁剪的方式写入（相当于 <code>XADD key MAXLEN ~ 1000</code>，防止 Stream 无限增长）、失败时回调子类的 <code>onSendFailed</code>。子类在回调里把实体状态改成 FAILED，简历分析和面试评估的回调用的是 <code>REQUIRES_NEW</code> 独立事务，保证即使调用方的事务回滚，失败状态也能落下来。</p>
+<h3 id="consumer">消费者</h3>
+<ul>
+  <li><strong>线程模型</strong>：每个消费者在 <code>@PostConstruct</code> 时创建一个显式配置的 <code>ThreadPoolExecutor</code>（核心与最大都是 1，守护线程，拒绝策略 Abort），里面跑一个 <code>while (running)</code> 循环；<code>@PreDestroy</code> 时置标志位并关闭线程池。项目规则禁止用 <code>Executors.newFixedThreadPool</code> 这类工厂方法，所以线程池都是手写参数。</li>
+  <li><strong>消费者组</strong>：启动时创建（带 MKSTREAM，已存在返回的 BUSYGROUP 忽略）；消费者名是前缀加 8 位 UUID，每个实例、每次启动都不同，多实例部署时天然分摊消息。</li>
+  <li><strong>先回收，再读新</strong>：每一轮先用 <code>XAUTOCLAIM</code> 认领空闲超过 5 分钟的 pending 消息（每轮最多 10 条，扫描游标按“Stream + 组”记在内存里，下一轮接着扫）；有就先处理这些，没有再用 <code>XREADGROUP</code> 阻塞 1 秒读最多 10 条新消息。回收时如果发现消息已被 MAXLEN 裁剪掉，会打告警日志。</li>
+  <li><strong>毒消息</strong>：解析失败或字段缺失的消息直接 ACK 丢弃并打日志，避免反复失败卡住整个组。</li>
+  <li><strong>Redisson 4.0 兼容</strong>：没有消息时 <code>readGroup</code> 和 <code>autoClaim</code> 会因为内部返回空 List 而抛 <code>ClassCastException</code>，<code>RedisService</code> 把它当成“本轮无消息”处理，并在类注释里写明升级后可以删掉。</li>
+</ul>
+<h3 id="pipelines">五条管线对照</h3>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>管线</th><th>Stream / 消费者组</th><th>消息内容</th><th>状态字段</th><th>额外的恢复手段</th></tr></thead>
+    <tbody>
+      <tr><td>简历分析</td><td><code>resume:analyze:stream</code> / analyze-group</td><td>简历 ID、正文、重试次数</td><td><code>resumes.analyze_status</code></td><td>用户手动“重新分析”</td></tr>
+      <tr><td>知识库向量化</td><td><code>knowledgebase:vectorize:stream</code> / vectorize-group</td><td>知识库 ID、正文、重试次数</td><td><code>knowledge_bases.vector_status</code></td><td>用户手动“重新向量化”</td></tr>
+      <tr><td>文字面试评估</td><td><code>interview:evaluate:stream</code> / evaluate-group</td><td>会话 ID、重试次数</td><td><code>interview_sessions.evaluate_status</code></td><td>只有 pending 回收</td></tr>
+      <tr><td>语音面试评估</td><td><code>voice:evaluate:stream</code> / voice-evaluate-group</td><td>语音会话 ID、重试次数</td><td><code>voice_interview_sessions.evaluate_status</code></td><td>每分钟扫描：PENDING 超 3 分钟重投，PROCESSING 超 30 分钟判失败；用户可显式重试</td></tr>
+      <tr><td>知识库题库生成</td><td><code>knowledgebase:question-gen:stream</code> / question-gen-group</td><td>知识库 ID、taskId、重试次数</td><td><code>knowledge_bases.question_gen_*</code></td><td>每分钟扫描：QUEUED 超 2 分钟重投，PROCESSING 超 20 分钟复位</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="callout risk">
+  <span class="label">这套模板的边界</span>
+  <p>每条管线每个实例只有一个消费线程，大模型一次调用 20 秒，排队 10 个任务就要等三分多钟；可以改成可配置的并发消费加信号量背压。除题库生成外，其他管线的“领取”只是直接改状态，不是比较后更新，如果某个任务执行超过 5 分钟，可能被别的实例重复认领。失败只落在状态字段，没有死信队列可供人工回放。简历和知识库正文被整篇放进消息体，大文档会占用 Redis 内存，更好的做法是只传 ID，由消费者从对象存储重新读取。</p>
+</div>
+
+<h2 id="after-commit">先提交，再投递</h2>
+<p>异步任务最隐蔽的一类 bug 是“消息比数据先到”：如果在数据库事务提交前就把消息发出去，消费者可能读到旧状态，甚至读不到这一行；如果先发消息、后面事务回滚，就产生了“幽灵任务”。项目里有三种写法保证顺序：</p>
+<ul>
+  <li><strong>事务同步回调</strong>：语音面试结束会话时，<code>sendEvaluateTaskAfterCommit</code> 判断当前是否在事务中，是就注册一个 <code>afterCommit</code> 回调，事务提交后才投递。</li>
+  <li><strong>小事务执行器</strong>：简历“重新分析”先用 <code>TransactionalExecutor.run</code> 把状态改回 PENDING 并提交，再在事务外投递。这个执行器还解决了同类方法内部调用导致 <code>@Transactional</code> 失效的问题。</li>
+  <li><strong>状态服务单独成事务</strong>：题库生成先调用 <code>QuestionGenerationStateService.createTask</code>（自带事务）落好 QUEUED 和新 taskId，返回后才发消息；发送失败就把任务标记为 FAILED。</li>
+</ul>
+<p>剩下的缝隙是“提交成功、但投递失败且没来得及改状态”（比如进程恰好在两步之间崩溃），状态会停在 PENDING 或 QUEUED。题库生成和语音评估靠调度器兜底，其他管线靠用户手动重试。完整的解决方案是事务性发件箱（Outbox）：把消息和业务数据写进同一个事务的发件表，再由独立线程扫描投递。面试被问到时可以把这条改进路线讲出来。</p>
+
+<h2 id="state-machine">题库生成状态机</h2>
+<p>这是整个项目里一致性设计最严密的部分，源于一次真实问题：同一个知识库可以反复点“生成题目”，上一次的 Worker 可能还在跑，它的结果不能覆盖新任务；消费失败后状态也不能一直停在 PROCESSING。提交 <span class="sha">7915d65</span> 先写了两个失败的测试复现这两个问题，<span class="sha">7cf90b3</span> 定义了状态事务的契约，<span class="sha">3ac6178</span> 和 <span class="sha">4f5765f</span> 让它们通过。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 320" role="img" aria-label="题库生成状态机：NONE 提交后进入 QUEUED，被原子领取后进入 PROCESSING，成功时在同一事务内替换题目并进入 COMPLETED，失败重试回到 QUEUED，重试耗尽进入 FAILED；COMPLETED 和 FAILED 都可以再次提交生成新的 taskId；恢复调度器会重投超时的 QUEUED 并把超时的 PROCESSING 复位为 QUEUED。">
+      <defs>
+        <marker id="sm-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="sm-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+        <marker id="sm-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head warn"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="110" width="110" height="52" rx="26"/>
+      <text class="dg-t" x="71" y="141" text-anchor="middle">NONE</text>
+      <rect class="dg-box" x="226" y="110" width="150" height="52" rx="26"/>
+      <text class="dg-t" x="301" y="141" text-anchor="middle">QUEUED</text>
+      <rect class="dg-box accent" x="486" y="110" width="150" height="52" rx="26"/>
+      <text class="dg-t" x="561" y="141" text-anchor="middle">PROCESSING</text>
+      <rect class="dg-box good" x="776" y="110" width="168" height="52" rx="26"/>
+      <text class="dg-t" x="860" y="141" text-anchor="middle">COMPLETED</text>
+      <rect class="dg-box bad" x="486" y="246" width="150" height="52" rx="26"/>
+      <text class="dg-t" x="561" y="277" text-anchor="middle">FAILED</text>
+      <rect class="dg-box warn" x="16" y="246" width="160" height="52" rx="8"/>
+      <text class="dg-t" x="96" y="268" text-anchor="middle">恢复调度（每分钟）</text>
+      <text class="dg-s" x="96" y="287" text-anchor="middle">QUEUED 2 分钟 · PROCESSING 20 分钟</text>
+
+      <line class="dg-line" x1="126" y1="136" x2="224" y2="136" marker-end="url(#sm-a)"/>
+      <text class="dg-lbl" x="175" y="129" text-anchor="middle">提交：新 taskId</text>
+      <line class="dg-line accent" x1="376" y1="128" x2="484" y2="128" marker-end="url(#sm-c)"/>
+      <text class="dg-lbl accent" x="430" y="121" text-anchor="middle">锁内比较后领取</text>
+      <line class="dg-line" x1="486" y1="148" x2="378" y2="148" marker-end="url(#sm-a)"/>
+      <text class="dg-lbl" x="432" y="165" text-anchor="middle">失败，重试</text>
+      <line class="dg-line accent" x1="636" y1="136" x2="774" y2="136" marker-end="url(#sm-c)"/>
+      <text class="dg-lbl accent" x="705" y="129" text-anchor="middle">同一事务替换题目</text>
+      <line class="dg-line warn" x1="561" y1="162" x2="561" y2="244" marker-end="url(#sm-w)"/>
+      <text class="dg-lbl warn" x="569" y="207">重试耗尽 / 投递失败</text>
+      <path class="dg-line" d="M860,110 L860,44 L301,44 L301,108" marker-end="url(#sm-a)"/>
+      <text class="dg-lbl" x="580" y="37" text-anchor="middle">再次生成：换新 taskId，旧 Worker 结果作废</text>
+      <path class="dg-line" d="M486,272 L301,272 L301,164" marker-end="url(#sm-a)"/>
+      <text class="dg-lbl" x="394" y="265" text-anchor="middle">重新生成</text>
+      <path class="dg-line warn dash" d="M176,272 L258,272 L258,164" marker-end="url(#sm-w)"/>
+      <text class="dg-lbl warn" x="214" y="265" text-anchor="middle">重投 · 复位</text>
+    </svg>
+  </div>
+  <figcaption>每一条箭头都是一次“锁住知识库行 → 核对 taskId 和当前状态 → 符合才更新”的小事务。旧 Worker 手里的 taskId 已经不是当前值，它发起的任何迁移都会比较失败，结果被丢弃。</figcaption>
+</figure>
+<h3 id="sm-mechanics">几个关键机制</h3>
+<ul>
+  <li><strong>围栏令牌</strong>：每次提交生成一个 UUID 作为 taskId，存到知识库行上，消息里也带着它。所有迁移方法都要求“传入的 taskId 等于当前 taskId，且状态等于预期状态”，否则返回 false 什么都不做。</li>
+  <li><strong>行锁</strong>：比较和更新发生在 <code>SELECT … FOR UPDATE</code>（JPA 的 <code>PESSIMISTIC_WRITE</code>）之内，把同一知识库的状态迁移串行化，避免两个消费者同时通过检查。</li>
+  <li><strong>提交时的校验</strong>：知识库必须已经完成向量化；已有 QUEUED 或 PROCESSING 的任务时拒绝重复提交。</li>
+  <li><strong>参数快照</strong>：难度、题量、追问数、方向上限、Provider 序列化成 JSON 存在 <code>question_gen_config</code>，不包含 Prompt、上下文或密钥。重试和恢复时从这里读参数，不依赖消息体。</li>
+  <li><strong>大模型调用在事务外</strong>：检索上下文、调用模型、构建实体都不持有锁；最后一步才开一个小事务，再次核对 taskId 和 PROCESSING 状态，然后删除旧题、保存新题、写入完成状态和“已生成 X 道，跳过 Y 道重复题”的消息。任何一步失败整体回滚。</li>
+  <li><strong>失败信息脱敏</strong>：对外只写“题目生成失败，请稍后重试”，具体异常留在日志里。</li>
+  <li><strong>前端配合</strong>：提交后立即跳到题库页，按 3 秒间隔轮询状态；只有“同一个任务从活动态变成 COMPLETED”时才刷新列表。这条规则来自浏览器实测时发现的问题：页面首次加载读到历史的 COMPLETED 状态，会误把筛选条件切到“草稿”，出现“暂无题目”的假象（<span class="sha">20ca85c</span>、<span class="sha">1f82388</span>）。</li>
+</ul>
+<div class="callout pitch">
+  <span class="label">面试这样说</span>
+  <p>异步任务最怕的不是失败，而是“过期的成功”：用户已经重新提交了，老任务才跑完并把结果写进去。我们给每次提交发一个 taskId 当围栏令牌，所有状态迁移都在行锁里比较 taskId 和当前状态，比较失败就丢弃。大模型调用放在锁和事务之外，只有最后的“替换题目 + 标记完成”是一个短事务。</p>
+</div>
+
+<h2 id="idempotency">幂等设计</h2>
+<h3 id="idem-create">刷新不重复出题</h3>
+<p>文字面试创建一次要调用两次大模型，耗时十几秒到一分钟。用户在等待时刷新页面，早期版本会再出一套题（<span class="sha">0f66810</span> 修复，<span class="sha">2ab89e1</span> 又补上了 Redis 映射丢失时的数据库兜底）。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 230" role="img" aria-label="幂等创建流程：前端把请求 ID 放进 URL，后端对该 ID 加分布式锁，依次查 Redis 结果映射和数据库 request_id，都没有才调用模型出题并落库；数据库唯一索引冲突时回查已有会话返回。">
+      <defs>
+        <marker id="id-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="id-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="40" width="170" height="64" rx="8"/>
+      <text class="dg-t" x="101" y="64" text-anchor="middle">/interview/create/{uuid}</text>
+      <text class="dg-s" x="101" y="84" text-anchor="middle">刷新时 URL 不变</text>
+      <rect class="dg-box accent" x="216" y="40" width="160" height="64" rx="8"/>
+      <text class="dg-t" x="296" y="64" text-anchor="middle">分布式锁</text>
+      <text class="dg-s" x="296" y="84" text-anchor="middle">等 185 秒 · 租 600 秒</text>
+      <rect class="dg-box" x="406" y="40" width="130" height="64" rx="8"/>
+      <text class="dg-t" x="471" y="64" text-anchor="middle">Redis 结果映射</text>
+      <text class="dg-s" x="471" y="84" text-anchor="middle">保留 1 天</text>
+      <rect class="dg-box" x="566" y="40" width="130" height="64" rx="8"/>
+      <text class="dg-t" x="631" y="64" text-anchor="middle">数据库 request_id</text>
+      <text class="dg-s" x="631" y="84" text-anchor="middle">唯一索引</text>
+      <rect class="dg-box" x="726" y="40" width="218" height="64" rx="8"/>
+      <text class="dg-t" x="835" y="64" text-anchor="middle">出题 → 先落库 → 再写缓存</text>
+      <text class="dg-s" x="835" y="84" text-anchor="middle">两次模型调用</text>
+      <line class="dg-line" x1="186" y1="72" x2="214" y2="72" marker-end="url(#id-a)"/>
+      <line class="dg-line" x1="376" y1="72" x2="404" y2="72" marker-end="url(#id-a)"/>
+      <line class="dg-line" x1="536" y1="72" x2="564" y2="72" marker-end="url(#id-a)"/>
+      <text class="dg-lbl" x="550" y="65" text-anchor="middle">没有</text>
+      <line class="dg-line" x1="696" y1="72" x2="724" y2="72" marker-end="url(#id-a)"/>
+      <text class="dg-lbl" x="710" y="65" text-anchor="middle">没有</text>
+      <rect class="dg-box good" x="406" y="150" width="130" height="56" rx="8"/>
+      <text class="dg-t" x="471" y="174" text-anchor="middle">返回已有会话</text>
+      <text class="dg-s" x="471" y="193" text-anchor="middle">不调模型</text>
+      <rect class="dg-box good" x="566" y="150" width="130" height="56" rx="8"/>
+      <text class="dg-t" x="631" y="174" text-anchor="middle">回填映射后返回</text>
+      <text class="dg-s" x="631" y="193" text-anchor="middle">不调模型</text>
+      <rect class="dg-box good" x="726" y="150" width="218" height="56" rx="8"/>
+      <text class="dg-t" x="835" y="174" text-anchor="middle">唯一索引冲突 → 回查返回</text>
+      <text class="dg-s" x="835" y="193" text-anchor="middle">并发兜底</text>
+      <line class="dg-line accent" x1="471" y1="104" x2="471" y2="148" marker-end="url(#id-c)"/>
+      <text class="dg-lbl accent" x="479" y="130">命中</text>
+      <line class="dg-line accent" x1="631" y1="104" x2="631" y2="148" marker-end="url(#id-c)"/>
+      <text class="dg-lbl accent" x="639" y="130">命中</text>
+      <line class="dg-line" x1="835" y1="104" x2="835" y2="148" marker-end="url(#id-a)"/>
+      <text class="dg-lbl" x="843" y="130">写库失败</text>
+    </svg>
+  </div>
+  <figcaption>三层保护各有分工：锁让并发的重复请求排队，Redis 映射让后续请求快速返回，数据库唯一索引是 Redis 丢数据时的最终真相。创建成功后前端用 replace 跳到 /interview/session/{id}，此后刷新走“恢复会话”而不是“创建”。</figcaption>
+</figure>
+<p>几个细节：请求 ID 由前端在进入 <code>/interview</code> 时用 <code>crypto.randomUUID()</code> 生成并写进 URL，面试配置放在 history state 里，刷新后都还在；后端要求请求 ID 匹配 <code>[A-Za-z0-9_-]{8,64}</code>，否则拒绝；锁的等待时间 185 秒略长于一次出题的最长耗时，第二个请求会等第一个完成后直接读到结果；代码注释里写着“幂等请求必须先成功落库，再写入易失缓存”，数据库是真相，Redis 只是加速层。</p>
+<h3 id="idem-others">其他幂等点</h3>
+<ul>
+  <li><strong>上传去重</strong>：简历和知识库都按文件内容的 SHA-256（不是文件名）去重，唯一索引兜底，命中直接返回已有记录。</li>
+  <li><strong>答案写入</strong>：<code>(session_id, question_index)</code> 唯一，保存时先查再更新，同一题提交多次只会改同一行。</li>
+  <li><strong>消费端</strong>：所有消费者在处理前检查实体是否已删除、是否已完成；题库生成额外做原子领取。</li>
+  <li><strong>显式重试</strong>：语音评估的 POST 接口语义是“重新生成”：已完成直接返回结果，处理中返回当前状态，PENDING 或 FAILED 会真实重新投递（<span class="sha">dab8b57</span> 修复了早期对卡住的 PENDING 只返回原状态的问题）。</li>
+  <li><strong>前端防重入</strong>：React StrictMode 在开发环境会把 effect 执行两次，导致面试会话被创建两次，<span class="sha">5c878a3</span> 用 <code>useRef</code> 标记防止重入。</li>
+</ul>
+
+<h2 id="cache">缓存设计</h2>
+<p>文字面试的会话状态（题目列表、当前题号、状态、简历文本）放在 Redis：键 <code>interview:session:{id}</code>，24 小时过期，每次访问续期；另有 <code>interview:resume:{resumeId}</code> 记录某份简历的未完成会话，用于“继续面试”。</p>
+<ul>
+  <li><strong>读</strong>：先查 Redis；未命中就从数据库恢复，题目来自 <code>questions_json</code>，已作答的内容从答案表回填到对应题目，恢复后写回 Redis。</li>
+  <li><strong>写</strong>：提交答案时先写数据库（答案、当前题号、状态，失败直接报错给用户），再更新 Redis；Redis 更新失败不影响正确性，下一次读会从数据库恢复。</li>
+  <li><strong>语音会话</strong>：实体缓存在 <code>voice:interview:session:{id}</code>，1 小时过期；结束、暂停、评估状态变化时直接删除缓存（<span class="sha">dab8b57</span> 修复过“评估状态已更新但缓存还是旧的”问题）。</li>
+</ul>
+<p>值得讨论的一点：语音会话缓存的是 JPA 实体本身，实体结构一改，缓存里的旧对象就可能反序列化失败；把缓存对象和持久化实体分开是更稳妥的做法。</p>
+
+<h2 id="rate-limit">多维限流</h2>
+<h3 id="rl-usage">用法</h3>
+<p><code>@RateLimit</code> 是可重复注解，一个方法上可以叠加多条规则，每条规则是一个维度（全局、IP、用户）和一个“每 interval 时间内最多 count 次”的配额，默认单位是秒。所有规则都通过才放行，否则调用同类里的降级方法，或抛出限流异常（错误码 8001）。</p>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>接口</th><th>规则</th></tr></thead>
+    <tbody>
+      <tr><td>简历上传、创建文字面试</td><td>全局每秒 5 次 + 单 IP 每秒 5 次</td></tr>
+      <tr><td>简历重新分析、知识库重新向量化、题库生成</td><td>全局 2 次 + 单 IP 2 次（每秒）</td></tr>
+      <tr><td>知识库上传</td><td>全局 3 次 + 单 IP 3 次</td></tr>
+      <tr><td>知识库问答：普通 / 流式</td><td>全局与单 IP 各 10 次 / 各 5 次</td></tr>
+      <tr><td>提交答案</td><td>全局 10 次</td></tr>
+      <tr><td>JD 解析</td><td>单 IP 5 次</td></tr>
+      <tr><td>Provider 管理</td><td>读 30 次、写 5 次、连通性测试 10 次（全局）</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>没有加限流的调用模型接口也值得指出：问答助手的会话流式接口、日程解析、语音会话创建和语音评估重试。</p>
+<h3 id="rl-algorithm">Lua 脚本怎么算</h3>
+<p>每条规则对应两个 Redis 键：<code>…:value</code> 存当前剩余令牌数，<code>…:permits</code> 是一个有序集合，记录每次发放（分数是时间戳，成员是“请求 ID:规则序号:数量”）。判断时，可用令牌 = 当前值（不存在则为上限）+ 已经滑出时间窗口的发放记录之和，封顶为上限。这是“滑动窗口 + 过期令牌回补”的组合，精度比固定窗口高，代价是每次放行都要在有序集合里记一条。</p>
+<p>键名形如 <code>ratelimit:{Class:method}:ip:1.2.3.4</code>。花括号是 Redis Cluster 的 hash tag，保证同一个方法的所有维度落在同一个槽位上，这是能在一个 Lua 脚本里同时操作多个键的前提。</p>
+<h3 id="rl-atomic">多维原子性：一次真实修复</h3>
+<p>一次请求要同时满足“全局”和“IP”两条规则。如果逐条“检查并扣减”，第一条扣了、第二条拒绝，第一条的配额就白白损失了。项目的脚本分两个阶段，<span class="sha">ca2e812</span>（合并自贡献者的 PR #39）又修正了其中一个细节：</p>
+<div class="split">
+  <div>
+    <h4>修复前</h4>
+    <ol>
+      <li>规则一：删除窗口外的发放记录（已经在写 Redis），计算余量，够。</li>
+      <li>规则二：计算余量，不够，返回拒绝。</li>
+      <li>请求被拒，但规则一的有序集合已被改写。</li>
+    </ol>
+  </div>
+  <div>
+    <h4>修复后</h4>
+    <ol>
+      <li>阶段一只读：逐条算出可用令牌，任何一条不够立即返回 <code>-i</code>（第 i 条规则失败），一个键都不写。</li>
+      <li>阶段二：全部通过后，逐条删除过期记录、写入本次发放、扣减余量，两个键的过期时间设为窗口的两倍。</li>
+      <li>拒绝的请求对任何维度都没有副作用。</li>
+    </ol>
+  </div>
+</div>
+<p>这个修复配了 Testcontainers 的集成测试，用真实的 Redis 7 容器验证“多维回滚”和“各维度独立计数”。其他细节：脚本启动时 <code>SCRIPT LOAD</code> 后用 <code>EVALSHA</code> 调用，Redis 重启导致脚本缓存丢失（NOSCRIPT）时自动重新加载再试；返回的负数下标用来定位是哪条规则拒绝的；IP 依次取 <code>X-Forwarded-For</code> 第一段、<code>X-Real-IP</code> 等头，最后才用连接地址。</p>
+<div class="callout risk">
+  <span class="label">安全上的保留意见</span>
+  <p>IP 维度直接信任请求头，没有校验可信代理，客户端伪造 <code>X-Forwarded-For</code> 就能绕过单 IP 限制；用户维度读 <code>X-User-Id</code> 头，在没有鉴权的前提下同样可伪造。生产环境应只信任网关写入的头，用户 ID 从认证上下文里取。</p>
+</div>
+
+<h2 id="transactions">事务边界</h2>
+<p>规则只有两句：事务只放在 Service 的公开方法上并保持最小；事务内不调用大模型、对象存储和外部 HTTP。提交 <span class="sha">5c878a3</span> 里有一条记录就是修这个问题：原来在 <code>@Transactional</code> 方法里调用大模型，改成只把数据库写入单独放进事务。几个典型场景：</p>
+<ul>
+  <li><strong>删除知识库</strong>：事务内删数据库记录（先把它从所有问答会话的多对多关联里移除，否则外键会阻止删除）；事务提交后删向量数据（失败只记日志）；最后删对象存储文件（失败时日志里带上 storageKey，便于补偿）。顺序是“先删权威数据，再清理衍生数据”。</li>
+  <li><strong>向量化</strong>：几十上百次 Embedding 调用在事务外完成，只有最后“删旧向量 + 提升新向量”两条 SQL 放在一个事务里，见 <a href="modules.html#vector-shadow">业务模块</a>。</li>
+  <li><strong>题库生成</strong>：见上文状态机。</li>
+</ul>
+<p>源码里也能找到几处没守住规则的地方，比如同类内部调用 <code>@Transactional</code> 方法、在 <code>@PostConstruct</code> 上加事务、在事务方法内部加锁导致锁比提交先释放，这些都整理在 <a href="quality.html#findings">质量与问题</a> 里。</p>
+
+<h2 id="timeouts">超时、恢复与降级一览</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>位置</th><th>数值</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>大模型 HTTP 客户端</td><td class="num">连接 10s · 读取 300s</td><td>给长输出留足时间</td></tr>
+      <tr><td>Nginx 反代</td><td class="num">300s</td><td>与后端读超时对齐</td></tr>
+      <tr><td>前端 Axios</td><td class="num">60s · 上传 300s</td><td>普通请求与上传分开</td></tr>
+      <tr><td>对象存储</td><td class="num">单次 20s · 总计 60s</td><td>S3 SDK 的 attempt / call 超时</td></tr>
+      <tr><td>Provider 连通性测试</td><td class="num">连接 5s · 读取 10s</td><td>测试接口不能拖住页面</td></tr>
+      <tr><td>TTS</td><td class="num">建连 5s · 单句 8s · 合成 30s</td><td>防止握手失败或单句卡住整轮</td></tr>
+      <tr><td>ASR 就绪检查</td><td class="num">10s 检查 · 最多重连 2 次</td><td>识别服务迟迟不就绪时自动重连</td></tr>
+      <tr><td>WebSocket 发送</td><td class="num">10s · 缓冲 512KB</td><td>慢客户端不阻塞服务端线程</td></tr>
+      <tr><td>Stream 消费</td><td class="num">阻塞 1s · pending 空闲 5min</td><td>空转频率与回收时机</td></tr>
+      <tr><td>题库生成恢复</td><td class="num">QUEUED 2min · PROCESSING 20min</td><td>每 60 秒扫描一次</td></tr>
+      <tr><td>语音评估恢复</td><td class="num">PENDING 3min · PROCESSING 30min</td><td>前端 2 分钟时先提示可重试，后端 3 分钟自动重投，两个边界有测试约束先后顺序</td></tr>
+      <tr><td>语音会话</td><td class="num">闲置 4.5min 警告 · 5min 暂停 · 2h 强制结束</td><td>释放识别连接，防止状态永远停在进行中</td></tr>
+      <tr><td>创建面试的锁</td><td class="num">等待 185s · 租约 600s</td><td>覆盖一次出题的最长耗时</td></tr>
+      <tr><td>缓存</td><td class="num">文字会话 24h · 语音会话 1h · 幂等映射 1d</td><td>—</td></tr>
+    </tbody>
+  </table>
+</div>
+<h3 id="degrade">降级清单</h3>
+<ul>
+  <li>出题：简历题和方向题互为降级，都失败用兜底题。</li>
+  <li>评估：批次失败按 0 分兜底，汇总失败退回批次结论拼接。</li>
+  <li>RAG：查询改写失败用原问题；带过滤条件的检索失败时，改为不带过滤多取三倍结果再在内存里过滤。</li>
+  <li>语音：上下文摘要失败沿用旧摘要；单句合成失败跳过该句，全部失败再用整段文本合成一次。</li>
+  <li>简历分析：模型失败时返回一份“分析出错”的 0 分报告。这条降级有副作用，会让重试机制失效，见 <a href="quality.html#findings">质量与问题</a>。</li>
+</ul>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="ai-foundation.html"><span class="dir">上一页</span><span class="ttl">AI 工程底座</span></a>
+      <a class="next" href="modules.html"><span class="dir">下一页</span><span class="ttl">业务模块逐个拆解</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>

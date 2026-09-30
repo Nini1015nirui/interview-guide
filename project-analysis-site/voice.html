@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>语音面试 · InterviewGuide 项目拆解</title>
+<meta name="description" content="从麦克风到扬声器的完整时序：识别、合成、回声防护、会话生命周期与已知问题。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html" aria-current="page">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">项目解析 · 语音面试</p>
+  <h1>实时语音面试链路：从麦克风到扬声器</h1>
+  <p class="lead">语音面试是整个项目里并发和时序最复杂的部分：一端是浏览器的麦克风和扬声器，一端是三个外部实时服务（语音识别、大模型、语音合成），中间的 WebSocket 处理器要在几百毫秒的尺度上协调它们。这一页按一轮对话的时间顺序拆开，再逐个讲识别、合成、回声防护、会话生命周期和已知问题。这部分的提交记录几乎都是“复现问题 → 修复”，是讲“排查过什么难题”的最好素材。</p>
+</header>
+
+<h2 id="sequence">一轮对话的完整时序</h2>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 600" role="img" aria-label="一轮语音对话的时序：浏览器每 200 毫秒发送一帧 16k PCM，处理器转发给语音识别，识别结果作为可编辑字幕回推；用户点击提交后，处理器流式调用大模型并节流推送文本，每检测到一句就并发调用语音合成，按序号下发音频块，保存消息后发送播放完成信号；从提交到浏览器播放结束，浏览器停发麦克风音频，处理器在模型与合成期间及之后 800 毫秒丢弃音频。">
+      <defs>
+        <marker id="sq-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="sq-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="30" y="16" width="120" height="38" rx="8"/>
+      <text class="dg-t" x="90" y="40" text-anchor="middle">浏览器</text>
+      <rect class="dg-box accent" x="250" y="16" width="160" height="38" rx="8"/>
+      <text class="dg-t" x="330" y="40" text-anchor="middle">WebSocket 处理器</text>
+      <rect class="dg-box" x="500" y="16" width="120" height="38" rx="8"/>
+      <text class="dg-t" x="560" y="40" text-anchor="middle">Qwen3 ASR</text>
+      <rect class="dg-box" x="670" y="16" width="120" height="38" rx="8"/>
+      <text class="dg-t" x="730" y="40" text-anchor="middle">大模型</text>
+      <rect class="dg-box" x="820" y="16" width="120" height="38" rx="8"/>
+      <text class="dg-t" x="880" y="40" text-anchor="middle">Qwen3 TTS</text>
+
+      <line class="dg-line dash" x1="90" y1="54" x2="90" y2="588"/>
+      <line class="dg-line dash" x1="330" y1="54" x2="330" y2="588"/>
+      <line class="dg-line dash" x1="560" y1="54" x2="560" y2="588"/>
+      <line class="dg-line dash" x1="730" y1="54" x2="730" y2="588"/>
+      <line class="dg-line dash" x1="880" y1="54" x2="880" y2="588"/>
+
+      <rect class="dg-box warn" x="84" y="258" width="12" height="310" rx="3"/>
+      <text class="dg-lbl warn" x="102" y="580">停发麦克风，直到本地播完</text>
+      <rect class="dg-box warn" x="324" y="290" width="12" height="262" rx="3"/>
+      <text class="dg-lbl warn" x="342" y="566">丢弃上行音频 + 冷却 800ms</text>
+
+      <line class="dg-line" x1="96" y1="84" x2="324" y2="84" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="78" text-anchor="middle">audio：200ms PCM 帧</text>
+      <line class="dg-line" x1="336" y1="112" x2="554" y2="112" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="445" y="106" text-anchor="middle">appendAudio</text>
+      <line class="dg-line dash" x1="554" y1="140" x2="336" y2="140" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="445" y="134" text-anchor="middle">partial：text + stash</text>
+      <line class="dg-line dash" x1="324" y1="168" x2="96" y2="168" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="162" text-anchor="middle">subtitle：实时字幕</text>
+      <line class="dg-line dash" x1="554" y1="196" x2="336" y2="196" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="445" y="190" text-anchor="middle">completed：静音 2 秒切段</text>
+      <line class="dg-line dash" x1="324" y1="224" x2="96" y2="224" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="218" text-anchor="middle">subtitle：合并后的可编辑文本</text>
+
+      <line class="dg-line accent" x1="96" y1="256" x2="324" y2="256" marker-end="url(#sq-c)"/>
+      <text class="dg-lbl accent" x="210" y="250" text-anchor="middle">control：submit（用户确认）</text>
+      <line class="dg-line accent" x1="336" y1="288" x2="724" y2="288" marker-end="url(#sq-c)"/>
+      <text class="dg-lbl accent" x="530" y="282" text-anchor="middle">流式调用：历史 + 简历 + 语音约束</text>
+      <line class="dg-line dash" x1="724" y1="316" x2="336" y2="316" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="530" y="310" text-anchor="middle">token 流</text>
+      <line class="dg-line dash" x1="324" y1="344" x2="96" y2="344" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="338" text-anchor="middle">text：≥80ms 且 ≥4 字才推</text>
+      <line class="dg-line accent" x1="336" y1="376" x2="874" y2="376" marker-end="url(#sq-c)"/>
+      <text class="dg-lbl accent" x="605" y="370" text-anchor="middle">每凑够一句就合成 · 同时最多 3 句</text>
+      <line class="dg-line dash" x1="874" y1="404" x2="336" y2="404" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="605" y="398" text-anchor="middle">PCM 24kHz</text>
+      <line class="dg-line accent dash" x1="324" y1="436" x2="96" y2="436" marker-end="url(#sq-c)"/>
+      <text class="dg-lbl accent" x="210" y="430" text-anchor="middle">audio_chunk #0、#1…按序</text>
+      <rect class="dg-box" x="352" y="452" width="206" height="36" rx="6"/>
+      <text class="dg-s" x="455" y="475" text-anchor="middle">模型输出结束：落库本轮问答</text>
+      <line class="dg-line dash" x1="324" y1="512" x2="96" y2="512" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="506" text-anchor="middle">control：audio_complete</text>
+      <line class="dg-line dash" x1="324" y1="540" x2="96" y2="540" marker-end="url(#sq-a)"/>
+      <text class="dg-lbl" x="210" y="534" text-anchor="middle">（队列播完才把 AI 消息定稿）</text>
+    </svg>
+  </div>
+  <figcaption>两条橙色竖条是回声防护的时间窗口：浏览器从点击提交开始停发麦克风，直到本地音频队列真正播完；服务端从开始调用模型起丢弃上行音频，发完音频后再多等 800 毫秒。服务端并不知道浏览器什么时候播完，所以两端的窗口互相补位。</figcaption>
+</figure>
+<p>把时序拆成三段看会更清楚：</p>
+<ol class="steps">
+  <li><strong>听</strong>：浏览器的 AudioWorklet 把麦克风的浮点采样重采样到 16kHz、转成 16 位整数，每攒够 3200 个采样（200 毫秒）发一帧，Base64 后通过 WebSocket 发给后端；后端解码后转发给 DashScope 的实时识别连接。识别服务开着服务端 VAD，静音 2 秒切一段，中间不断回推“已确定文本 + 暂定文本”作为实时字幕。</li>
+  <li><strong>想</strong>：用户看着字幕，可以直接修改识别结果，然后点“提交回答”。后端用 CAS 把会话标记为处理中，把阻塞的模型与合成管线丢到虚拟线程上执行，调度线程立即释放。模型以流式输出，文本按“距上次推送至少 80 毫秒且新增至少 4 个字”的节奏推给前端，避免刷屏。</li>
+  <li><strong>说</strong>：每检测到句末标点就把这一句提交给语音合成，最多 3 句并发；合成结果由一个“有序发射器”按句子序号依次下发，前端用 AudioContext 队列无缝拼接播放。第一句话往往在模型还没说完时就已经开始播放，这是降低“首响时延”的关键。</li>
+</ol>
+
+<h2 id="decisions">几个关键的设计决策</h2>
+<ul>
+  <li><strong>为什么由后端代理识别和合成</strong>：浏览器也可以直连 DashScope，但那样 API Key 会暴露在前端；由后端中转，还能把“识别结果 → 模型 → 合成”串成一条可控的管线，统一做回声防护、落库和指标埋点。</li>
+  <li><strong>为什么改成手动提交</strong>：早期版本靠 VAD 检测到用户停顿就自动提交给模型，结果有两个问题：扬声器的声音被麦克风拾取，被当成用户说话；用户思考时停顿两三秒，一个回答被切成两次提交。提交 <span class="sha">241b583</span> 改成“识别只负责生成可编辑文本，用户点按钮才提交”，同时删掉了自动提交的防抖逻辑。这是一次典型的“用产品交互化解技术难题”。</li>
+  <li><strong>为什么句子级并发合成</strong>：整段回复生成完再合成，用户要等“模型全部输出 + 整段合成”两段时间；按句合成后，首句的合成和后续内容的生成并行，首响时延只取决于第一句（<span class="sha">04ba710</span>）。</li>
+  <li><strong>为什么要有序发射器</strong>：并发合成时第二句可能比第一句先合成完，直接下发会乱序。发射器给每句一个序号，用一个等待线程按序号取结果，某一句超时或失败就跳过，不会卡住后面的句子。</li>
+  <li><strong>为什么用虚拟线程</strong>：DashScope SDK 的调用都是阻塞的（建连、等待结果），一轮对话要占用好几个线程等待网络。处理器只保留 2 个平台线程做定时调度，阻塞工作全部放进“每任务一个虚拟线程”的执行器，线程几乎不花钱。</li>
+</ul>
+
+<h2 id="asr">语音识别：连接、合并与重连</h2>
+<h3 id="asr-connect">建连与就绪信号</h3>
+<p>浏览器的 WebSocket 一连上，后端就为这个会话建一条到 DashScope 的实时识别连接：用独立线程执行 connect，发送会话配置（中文、PCM、16kHz、服务端 VAD、静音阈值 2000 毫秒），配置完成才把会话标记为就绪，并给前端发 <code>asr_ready</code>。前端收到就绪信号之前既不允许录音，也不发送音频。静音阈值设成 2 秒而不是默认的几百毫秒，配置注释里写明了原因：中文面试里思考停顿常见两三秒，阈值太短会把一句话切碎。</p>
+<p>如果 10 秒后还没就绪，后端给前端发“正在自动重连”，停掉旧连接重建，最多重试 2 次，仍失败就提示检查语音服务配置。</p>
+<h3 id="asr-merge">实时字幕与多段合并</h3>
+<p>识别服务会推两类事件：进行中的部分结果（由“已确定的 text + 暂定的 stash”拼出当前整句）和切段后的最终结果。后端维护一个合并缓冲区：每来一个最终段就拼进缓冲区，部分结果则“缓冲区 + 当前部分”一起作为字幕推给前端，所以用户看到的始终是整段回答而不只是最后一句。拼接时处理了识别服务常见的重叠现象：新段与旧段完全相同、新段以旧段开头、旧段以新段结尾时，都只保留一份；否则上一段以句末标点结尾就用空格连接，否则补一个逗号。</p>
+<h3 id="asr-recover">断线恢复与“第三轮起无声”</h3>
+<p>DashScope 的识别连接会被服务端关闭（空闲、网络抖动）。后端在发送音频失败时自动重建连接，再用 80 毫秒间隔最多重发 15 次这帧音频。这里有一个很隐蔽的 bug：旧连接的 <code>onClose</code> 回调可能在新连接建好之后才触发，它会把会话表里的新连接一起删掉，表现为“前两轮正常，第三轮起没有识别结果”。修复方式是在 <code>onClose</code> 里比较对象身份：只有会话表里存的仍是自己这条连接时才删除。同一会话的启动和停止还用一把按会话 ID 分配的锁串行化，避免并发的“停 + 启”交错。</p>
+<div class="callout pitch">
+  <span class="label">面试这样说</span>
+  <p>我们遇到过一个“第三轮起没声音”的问题。根因是重连时旧连接的关闭回调异步触发，按会话 ID 把刚建好的新连接从表里删了。修复是让关闭回调只删除“自己那条”连接，用对象身份而不是 ID 判断。这类问题的共性是：异步回调里只按 key 操作共享状态，没有确认状态是否已被别人替换，和乐观锁要解决的是同一类问题。</p>
+</div>
+
+<h2 id="tts">语音合成：超时、有序与兜底</h2>
+<ul>
+  <li><strong>每句一条连接</strong>：每次合成都新建一条到 DashScope 的实时合成连接，发送音色、格式（PCM 24kHz 单声道）、语速等配置，追加文本后提交，等服务端的 <code>response.done</code>，最后关闭连接。</li>
+  <li><strong>建连超时</strong>：SDK 的 connect 在握手失败时可能永远不返回，导致那一轮彻底卡死。提交 <span class="sha">b1b8133</span> 先写测试复现“握手失败后阻塞”，<span class="sha">226440b</span> 把 connect 放进虚拟线程、用倒计时锁存器等最多 5 秒，并重写 SDK 客户端的失败回调，握手失败时立即释放等待。</li>
+  <li><strong>三层超时</strong>：建连 5 秒、单句结果 8 秒（发射器等每一句的上限）、单次合成 30 秒（SDK 等待上限）。第二层来自 <span class="sha">1e2a34f</span>：当时 TTS 连接间歇性挂死，导致“第二题没有声音”。</li>
+  <li><strong>兜底</strong>：某一句失败就跳过，全部失败（一块音频都没发出去）时，再用整段文本合成一次。所有合成失败都返回空数组而不是抛异常，由调用方决定是否兜底。</li>
+  <li><strong>格式</strong>：合成返回裸 PCM，后端手写 44 字节 WAV 头后下发；前端分块模式下直接跳过这 44 字节，把 16 位整数转成浮点写入 AudioBuffer 排队播放。另有一个“合并模式”（收齐所有句子后拼成一个 WAV），由配置切换。</li>
+  <li><strong>开场白缓存</strong>：开场问题的音频按文本缓存在内存里；启动预热默认关闭（<span class="sha">8fc9be3</span>），因为预热会在应用启动时就产生十几次云端合成调用，测试和本地开发都不希望这样。</li>
+</ul>
+
+<h2 id="echo">回声与串话防护</h2>
+<p>AI 的声音从扬声器出来，又被麦克风收进去，识别成“用户在说话”，这就是回声问题；上一轮的识别结果迟到，出现在下一轮的输入框里，这是串话问题。项目最终用了四层防护：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>层</th><th>位置</th><th>做法</th><th>解决什么</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>浏览器音频栈</td><td>采集时开启回声消除、降噪、自动增益；采集链路末端接一个增益为 0 的节点，保证处理链运转但不把麦克风声音回放到扬声器</td><td>硬件层面的回声</td></tr>
+      <tr><td>2</td><td>前端发送</td><td>识别未就绪、正在提交、AI 正在说话（直到本地音频队列播完）时，不发送任何音频帧</td><td>AI 播放期间的回声</td></tr>
+      <tr><td>3</td><td>后端接收</td><td>从开始调用模型到音频全部发出，再加 800 毫秒冷却期，丢弃所有上行音频</td><td>前端判断失误、扬声器尾音</td></tr>
+      <tr><td>4</td><td>识别结果</td><td>后端在“处理中或 AI 说话中”丢弃迟到的识别结果；前端在同样的状态下忽略未定稿字幕（<span class="sha">3d49036</span>）</td><td>上一轮字幕串到下一轮</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>第四层是 2026 年 8 月最后一个功能修复，配了后端单测和一个 Playwright 回归用例：往页面里注入一个假的 WebSocket，在“提交之后”推送一条上一轮的旧字幕，断言输入区不被覆盖，而下一轮的新字幕能正常显示。</p>
+
+<h2 id="persistence">消息怎么存</h2>
+<p>语音消息表里每一行是“一次面试官发言 + 候选人对它的回答”。开场问题先存成一行（回答为空）；用户提交回答、模型给出下一问时，先把回答填进“最近一条还没有回答的面试官发言”，再为新问题新建一行。这样“问题和它的回答”天然在同一行，评估时配对很简单。</p>
+<p>开场问题必须“先落库再推前端”（<span class="sha">1e2a34f</span>）：之前是反过来的，用户回答得快时，回答去找“最近一条未回答的发言”却还没写进数据库，评估里就会出现“（未回答）”。上下文压缩的摘要也存在这张表里，类型为 SUMMARY，序号用负数 <code>-(已覆盖轮数 + 1)</code>，既保证排在最前，又顺手编码了“已经摘要到第几轮”，不需要额外的列。</p>
+
+<h2 id="lifecycle">会话生命周期</h2>
+<ul>
+  <li><strong>创建</strong>：选择方向、难度、计划时长（15–60 分钟）、是否带简历和模型。会话表里有自我介绍 / 技术 / 项目 / HR 四个阶段开关，前端固定关闭自我介绍阶段。</li>
+  <li><strong>开场</strong>：连接建立后，如果这个会话还没有任何对话，就按方向从 <code>voice-interview-opening.yml</code> 取开场问题（10 个方向各有一段，比如字节后端方向是算法热身题），落库后推送文本，再推送语音。恢复会话时有历史记录，不会重复开场。</li>
+  <li><strong>暂停</strong>：点“暂停”会弹出浏览器确认框，“确定”是短暂停（只停录音，5 分钟后自动转为长暂停），“取消”是长暂停（断开连接、状态改为 PAUSED、回到记录页），用取消按钮表达另一种操作不太直观；离开页面时如果不是用户主动结束，也会自动暂停。后端每 30 秒检查一次活跃时间：4 分 30 秒没有任何消息就提醒，5 分钟就暂停并断开，释放识别连接。</li>
+  <li><strong>恢复</strong>：状态改回进行中，前端拉取历史消息，按“面试官 / 候选人”交替还原对话气泡，再重新建立连接。</li>
+  <li><strong>结束</strong>：用户点结束，状态改为 COMPLETED、评估状态 PENDING，事务提交后才投递评估任务。WebSocket 异常断开时，如果会话还在进行中也会自动结束，防止状态永远停在进行中。</li>
+  <li><strong>兜底清理</strong>：每分钟一次：进行中超过 2 小时的会话强制结束；评估 PENDING 超过 3 分钟重新投递；PROCESSING 超过 30 分钟判定失败。评估页在 PENDING 超过 2 分钟时提示可以手动重新生成，两个时间点有测试约束先后顺序（<span class="sha">ae02d6f</span>）。</li>
+</ul>
+
+<h2 id="context">上下文压缩</h2>
+<p>每一轮都要把对话历史发给模型，长面试的 token 会线性增长。一位社区贡献者（PR #44，<span class="sha">833cba4</span>）加了可选的压缩器，三种模式：</p>
+<ul>
+  <li><strong>NONE</strong>：不压缩，发全量历史。</li>
+  <li><strong>WINDOW</strong>：只保留最近 20 轮原文，更早的丢弃。</li>
+  <li><strong>SUMMARY</strong>：最近 20 轮原文 + 更早轮次的滚动摘要。未被摘要覆盖的早期轮次攒够 10 轮才触发一次增量摘要，把新轮次合并进旧摘要，而不是每轮都调模型；摘要失败就沿用旧摘要，不影响本轮回答。摘要用不带工具的客户端生成，并在会话行的悲观锁内写入，防止并发重复。</li>
+</ul>
+<p>这个功能默认关闭，保证开启前后行为完全一致。它的 Prompt 模板里占位符写成了尖括号，和 Spring AI 默认的花括号分隔符不一致，开启后摘要模型拿不到真实对话，详见 <a href="ai-foundation.html#prompts">AI 底座 · Prompt 模板</a>。</p>
+
+<h2 id="metrics">可观测性</h2>
+<p>语音链路是项目里唯一做了细粒度指标埋点的地方（Micrometer，<span class="sha">04ba710</span>）：</p>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>指标</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>app.voice.interview.llm.first_token_latency</code></td><td>从调用模型到收到第一个 token，衡量“想”的速度</td></tr>
+      <tr><td><code>app.voice.interview.llm.duration</code> / <code>llm.calls</code></td><td>模型调用总耗时与次数（区分是否流式）</td></tr>
+      <tr><td><code>app.voice.interview.tts.duration</code> / <code>tts.empty_audio</code></td><td>合成耗时、合成结果为空的次数</td></tr>
+      <tr><td><code>app.voice.interview.asr.final_segments</code> / <code>asr.merge_wait</code></td><td>识别切段数、从第一段到提交的等待时长</td></tr>
+      <tr><td><code>app.voice.interview.turn.duration</code> / <code>turn.completed</code></td><td>整轮耗时与成功 / 失败次数</td></tr>
+      <tr><td><code>app.voice.interview.errors</code></td><td>按阶段统计的错误数</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>有了首 token 时延和整轮耗时，就能回答“慢在哪一段”。缺的是首句音频到达浏览器的时间（真正的用户感知时延），以及按 Provider 区分的标签。</p>
+
+<h2 id="voice-issues">已知问题与改进方向</h2>
+<div class="callout risk">
+  <span class="label">读源码时发现的问题</span>
+  <p>下面这些都能在源码里找到直接证据，适合回答“如果让你继续做，你会改什么”。</p>
+</div>
+<ul>
+  <li><strong>断线重连与“断线即结束”冲突</strong>：前端的 WebSocket 类在非正常关闭时会自动重连最多 3 次；而后端在连接关闭时，只要会话还在进行中就把它结束并投递评估。一次网络抖动之后，用户在重连上的连接里继续答题，评估却已经按不完整的记录在生成了。应该给断线一个宽限期，或让前端重连前先调用恢复接口。</li>
+  <li><strong>播报内容和记录不一致</strong>：每一轮回复会被截断到 120 字以内再保存、再作为字幕定稿，但按句合成在截断之前就已经开始，模型多说的句子会被念出来，却不在记录里，也不参与评估。</li>
+  <li><strong>模型失败被当成面试官发言</strong>：模型调用失败时，服务返回一句“抱歉，AI 服务暂时不可用”作为回复文本，这句话会被念出来、存进对话记录、进入下一轮的上下文和最终评估。应该走错误通道，而不是伪装成面试官的话。</li>
+  <li><strong>每轮都可能多一次工具调用</strong>：语音的系统提示词让模型“如果尚未加载角色设定就调用 Skill 工具”，但每轮调用都是无状态的，历史里只有文本、没有工具结果，从代码推断模型很可能每一轮都去加载一次，平白多一次模型往返。文字面试出题早已改成把人设直接注入 Prompt，语音可以照做，再用首 token 时延指标验证。</li>
+  <li><strong>JD 自定义方向在语音模式下失效</strong>：选择“自定义（JD 解析）”开始语音面试时，JD 原文只存进了会话表，没有进入任何 Prompt；系统提示词变成“你是一位 custom 方向的面试官”，还会让模型去加载一个不存在的 custom 技能。</li>
+  <li><strong>阶段化只做了一半</strong>：会话有四个阶段开关，配置里有每个阶段的建议时长和题数，服务里也写好了“是否该切换阶段”和“下一个阶段”的判断，但这两个方法只在测试里被调用，模型的 Prompt 里也没有阶段信息。现在的阶段字段只起到给消息打标签的作用。</li>
+  <li><strong>前端 VAD 空转</strong>：录音组件每次都会从 CDN 加载 Silero VAD 模型并启动它，但回调在页面里是空函数，已经不参与任何逻辑；两个 CDN 脚本还写在 <code>index.html</code> 的 head 里同步加载，拖慢所有页面的首屏，CDN 不可用时甚至无法开始录音。</li>
+  <li><strong>失效的配置项</strong>：<code>application.yml</code> 里仍有自动提交的防抖参数、语音限流（每会话、每 IP、全局并发）和音频编码参数，代码里没有任何地方读取。限流这组尤其误导，看配置会以为语音接口有保护。</li>
+  <li><strong>单机内存状态</strong>：会话连接、识别连接和会话状态都在处理器的内存 Map 里，多实例部署需要按会话 ID 做粘性路由；返回给前端的连接地址写死为 <code>ws://localhost:8080</code>，见 <a href="architecture.html#deployment">架构 · 部署</a>。</li>
+  <li><strong>每句新建合成连接</strong>：一轮回复 4 句话就要做 4 次 WebSocket 握手，握手本身就是几十到几百毫秒。可以按会话复用合成连接，或使用服务端支持的流式追加文本模式。</li>
+</ul>
+
+<h2 id="voice-pitch">怎么把语音链路讲清楚</h2>
+<div class="callout pitch">
+  <span class="label">两分钟版本</span>
+  <p>语音面试是浏览器、我们的后端和三个云端实时服务之间的一条流水线。浏览器用 AudioWorklet 采集 16k PCM，200 毫秒一帧通过 WebSocket 发给后端，后端转发给实时识别，识别结果作为可编辑字幕推回去；用户确认后提交，后端流式调用大模型，每生成一句就并发合成语音，用有序发射器按句子序号下发，前端用 AudioContext 队列播放，所以第一句话往往在模型还没说完时就开始播了。难点在时序：我们用四层防护处理回声和迟到字幕；用对象身份判断修过一个重连回调误删新连接导致“第三轮起无声”的问题；给 TTS 握手加了超时，修过一个握手失败导致整轮卡死的问题。整条链路在虚拟线程上跑，并对首 token 时延、合成耗时、整轮耗时做了指标埋点。</p>
+</div>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="modules.html"><span class="dir">上一页</span><span class="ttl">业务模块逐个拆解</span></a>
+      <a class="next" href="frontend.html"><span class="dir">下一页</span><span class="ttl">前端工程实现</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>
