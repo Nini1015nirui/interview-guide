@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 独立的最小实验工程：用与项目相同版本的 Spring AI 2.0.0 / spring-ai-agent-utils 0.10.0 验证框架行为。
+     不属于 Gradle 构建，不影响 CI。运行方式见 README.md。 -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>interview.guide.analysis</groupId>
+  <artifactId>spring-ai-agent-lab</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <!-- @Tool 方法按参数名绑定模型给出的参数，必须保留参数名 -->
+    <maven.compiler.parameters>true</maven.compiler.parameters>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-client-chat</artifactId>
+      <version>2.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springaicommunity</groupId>
+      <artifactId>spring-ai-agent-utils</artifactId>
+      <version>0.10.0</version>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <version>1.17.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>2.0.16</version>
+    </dependency>
+  </dependencies>
+</project>

@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agent 题库 · InterviewGuide 项目拆解</title>
+<meta name="description" content="60 道结合本项目源码与实验的 Agent 应用开发面试追问与参考回答，支持自测模式。">
+<meta name="color-scheme" content="light dark">
+<script>(function(){try{var t=localStorage.getItem('ig-analysis-theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap"></noscript>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <span class="crumb">Agent 专题 · Agent 题库</span>
+    <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
+    <nav class="sitenav" id="sitenav" aria-label="站点导航">
+      <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">Agent 专题</span><a href="agent-overview.html">Agent 总览</a><a href="agent-mechanics.html">机制拆解</a><a href="agent-lab.html">源码实验</a><a href="agent-upgrade.html">改造方案</a><a href="agent-qa.html" aria-current="page">Agent 题库</a><a href="agent-cheatsheet.html">考前速记</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
+    </nav>
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="切换主题">深色</button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="toc" aria-label="本页目录">
+    <details class="toc-box"><summary>本页目录</summary><ol class="toc-list" id="toc-list"></ol></details>
+  </aside>
+  <main class="content" id="main">
+<header class="page-head">
+  <p class="eyebrow">Agent 专题 · 面试题库</p>
+  <h1>Agent 应用开发面试题库：60 问，全部落到这个项目上</h1>
+  <p class="lead">按 Agent 岗面试最常见的追问路径组织：定性与架构、工具调用与循环、Skills 与 MCP、记忆与上下文工程、RAG、结构化输出与可靠性、评估、安全、实时与成本，最后是场景题。每道题都给出考察点、结合本项目源码或实验的参考回答，以及可能的下一问。项目自带的《AI Agent 开发面试参考》里列出的高频追问都包含在内。参考回答用第一人称，你需要按自己真实做过的部分改写。</p>
+</header>
+
+<div class="qa-tools">
+  <button type="button" class="icon-btn" data-qa-action="close">自测模式：收起全部答案</button>
+  <button type="button" class="icon-btn" data-qa-action="open">全部展开</button>
+</div>
+<p class="small muted">时间紧先练 AQ01、AQ05、AQ09、AQ11、AQ17、AQ25、AQ39、AQ44、AQ51、AQ60 这 10 道，它们覆盖了最常见的追问和本专题最有分量的四个实验。编号里的 A01–A12 指 <a href="agent-lab.html#findings">Agent 专项发现</a>，E1–E8 指 <a href="agent-lab.html">源码实验</a>。</p>
+
+<h2 id="qa-positioning">定性与架构</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ01</span>这个项目算 Agent 吗？你怎么定性？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：能否准确定性，不夸大。</p>
+    <p>严格说不算。12 个聊天模型调用点里，11 个的执行路径由代码编排，属于工作流；唯一的 Agent 循环在语音面试，模型可以自行调用 Skill 工具。另外默认配方给 7 个工作流步骤挂了工具，形成一种“意外的自主性”。我会定性为“以工作流为主、带一个工具调用循环的大模型应用”。定性小一点、分析深一点：说成工作流，面试官会问编排和可靠性，这是项目最强的部分；说成自主 Agent，会问规划、记忆和评测，这是最弱的部分。</p>
+    <p class="qa-follow">可能的追问：哪些环节值得升级成 Agent？（下一步取决于上一步结果的：追问决策、查证式问答、练习计划。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ02</span>工作流和 Agent 怎么选？这个项目为什么大部分环节不用 Agent？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：架构取舍，知道 Agent 的代价。</p>
+    <p>看“下一步由谁决定更好”。路径能预先确定、结果要被打分和复用、时延成本有硬预算的，用工作流；需要根据中间结果动态决定下一步的开放任务，用 Agent。这个项目的出题、评估、简历分析输入输出固定，产物落库并会被比较，工作流可以逐步重试和降级；语音每一轮本来就串着识别、生成、合成三段，多一次工具往返就多一段首响。Agent 的代价是 token 随步数累积、结果难复现、失败难定位。</p>
+    <p class="qa-follow">可能的追问：有没有折中？（有，工作流里嵌一个有边界的 Agent 步骤：只有“追问决策”交给模型，带预算和结构化输出。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ03</span>一个 Agent 由哪些部分组成？对照这个项目说说。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：体系化认识，而不是背公式。</p>
+    <p>常见说法是“大模型 + 规划 + 记忆 + 工具”；工程上更有用的是“模型 + Harness”，项目自带的参考把 Harness 分成六层。对照本项目：L1 信息边界有模板分离和数据边界，但人设被误标成了数据；L2 工具系统只有一个只读工具；L3 执行编排里工作流很强（Stream、状态机、围栏令牌），工具循环很弱；L4 记忆有会话双写、语音压缩、topicSummary 去重；L5 评估与可观测最弱，没有金标集和 token 统计；L6 约束与恢复最强，修复型重试、降级、幂等、恢复调度都有。</p>
+    <p class="qa-follow">可能的追问：规划体现在哪？（没有模型规划；题量分配算法是代码做的确定性规划。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ04</span>Harness 哪一层对质量影响最大？这个项目最该补哪层？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：优先级判断。</p>
+    <p>模型决定上限，Harness 决定下限；具体到层，L6 决定系统不出大事故，L5 决定你能不能持续变好。这个项目 L6 扎实而 L5 空白：没有金标集，改 Prompt 或换模型无法判断好坏；看不到真实的模型请求次数和 token，结构化重试最坏请求 8 次，而指标只显示 2 次。所以我改造时先补 L5 的最小版本：评委一致性和 RAG 召回两个金标集，再去加 Agent 能力。</p>
+    <p class="qa-follow">可能的追问：最小版本要多少样本？（二三十条就能发现方向性问题，再逐步扩到每个方向 30–50 条。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ05</span>如果让你把它升级成一个面试官 Agent，整体怎么设计？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Agent 设计的完整性：循环、工具、终止、上下文、评估。</p>
+    <p>保持工作流骨架不变，只把“每次回答后的下一步”交给 Agent。输入是本题题干、参考要点、候选人回答和对话摘要；工具是查要点、查知识库两个只读工具和一个幂等的记证据工具；输出是结构化的 NextAction（追问、下一题或收尾，加一句话和理由）；边界是每轮工具预算 3 次、模型请求上限 4 次，同一题最多追问 2 次由代码控制；人设进系统提示词，对话记录进用户消息并包数据边界；语音模式由代码预取要点，Agent 只决策不检索；评分解耦，证据进报告，总分仍由评估引擎计算。评估用录制片段加人工标注的“该追问什么”，看追问命中率。这套草图在 lab 里编译并跑通了（E6、E7）。</p>
+    <p class="qa-follow">可能的追问：为什么不用多 Agent？（只有一个决策点、工具很少，单 Agent 足够，多 Agent 只会增加成本和调试难度。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ06</span>ReAct 和 Plan-and-Execute 有什么区别？面试官 Agent 适合哪种？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：范式理解与落地选择。</p>
+    <p>ReAct 边想边做，每一步看到结果再决定下一步，适合步骤少、依赖中间结果的任务，缺点是容易绕圈、步数不可控；Plan-and-Execute 先规划整体步骤再执行，适合步骤多、能预先分解的任务，缺点是计划赶不上变化，需要重新规划。面试官每一轮的决策是典型的短 ReAct：查要点、记证据、做决策，一般两三步；而整场面试“考哪些方向、各几题”适合规划，项目用代码做的题量分配就是一个确定性的计划。所以我让计划留在代码里，每一轮的反应交给 Agent。</p>
+    <p class="qa-follow">可能的追问：Reflection 放在哪？（评估之后的自我复核：分数和证据矛盾时再审一次，最多一次。）</p>
+  </div>
+</details>
+
+<h2 id="qa-tools">工具调用与循环</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ07</span>Function Calling 的完整流程是什么？模型真的执行了工具吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：协议层理解。</p>
+    <p>客户端把工具的名称、描述、参数 JSON Schema 放进请求；模型要用工具时，返回的 assistant 消息里是 tool_calls（id、函数名、JSON 字符串形式的参数），可以一次多个；客户端执行工具，把结果作为 role=tool 的消息、用 tool_call_id 对应上，连同原对话和 tool_calls 一起再请求；循环到模型不再请求工具。模型从不执行任何东西，它只是输出“想调用什么”。两条约束：tool 消息必须紧跟对应的 tool_calls；第二轮必须带上完整上下文。</p>
+    <p class="qa-follow">可能的追问：工具描述写不好会怎样？（模型不用或乱用；描述就是提示词，要写清“什么时候用、返回什么”。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ08</span>Spring AI 2.0 里的工具循环是怎么实现的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：框架源码级理解。</p>
+    <p>ChatClient 把工具合并进 ToolCallingChatOptions，Advisor 链按 order 执行。ToolCallingAdvisor（默认 HIGHEST_PRECEDENCE+300）用一个 do-while 驱动：向内请求，响应里有 tool_calls 就交给 ToolCallingManager 执行对应的 ToolCallback，得到 tool 消息，再用“原消息 + assistant + tool”作为新指令继续向内请求。2.0 的 ChatClient 会自动注册它，一条链最多只能有一个；内侧有记忆 Advisor 时关闭内部历史。循环的每一轮都会穿过它内侧的全部 Advisor（SafeGuard、结构化校验），所以做 token 统计、循环保护的 Advisor 要放在 +300 之后。流式调用时先聚合分片，检测到 tool_calls 后在 boundedElastic 线程上执行工具再递归开下一轮流。</p>
+    <p class="qa-follow">可能的追问：returnDirect 是什么？（工具结果直接返回给调用方，不再回给模型，适合“查到就展示”的场景。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ09</span>项目说“多厂商对工具调用的校验不一致”所以放弃了工具，你怎么看？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：排查能力，不轻易接受“兼容性”结论。</p>
+    <p>我认为根因在客户端配置。项目 4 月让出题通过 Skill 工具加载人设，同时手动注册了 ToolCallAdvisor 并把内部历史关掉，记忆 Advisor 也关着；框架在这种配置下，工具回合的第二轮只发“系统消息 + 工具结果”。我用一个会调用工具的假模型复刻项目的 Advisor 组合，打印出第二轮确实是 SYSTEM → TOOL；又下载当时的 2.0.0-M4 源码确认同样的逻辑；再对齐提交时间线：先接入 SkillsTool，同一天引入关闭历史的 Advisor，5 天后人设只由工具加载，10 天后以“校验差异”为由退回注入。严格厂商会 400，宽松厂商不报错但丢了用户输入，“有的报错有的不报”正是那个现象。退回注入在成本上仍然是对的，但默认配方今天还挂着工具和同样的配置。</p>
+    <p class="qa-follow">可能的追问：怎么修？（删掉手动注册，交给 ChatClient 自动注册，或者把历史开关改为 true；默认配方去掉工具。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ10</span>ToolCallingAdvisor 的 conversationHistoryEnabled 是干什么的？什么时候可以关？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：理解组件之间的契约。</p>
+    <p>它决定工具循环的下一轮由 ToolCallingAdvisor 自己带上完整历史，还是只带“系统消息 + 最后一条”。可以关的前提是：有一个位于它内侧（order 更大）的记忆 Advisor，在每一轮负责注入历史。2.0 自动注册时就是按“内侧有没有 MemoryAdvisor”来决定这个开关的。只关它、又没有内侧的记忆，就会丢上下文，这就是项目默认配方的问题。另外记忆 Advisor 的默认 order 是 +200，在外侧，本来也接管不了工具回合。</p>
+    <p class="qa-follow">可能的追问：为什么要有这个开关？（让对话记忆统一由记忆组件管理，避免工具回合的中间消息被重复写进记忆。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ11</span>Agent Loop 怎么防止无限循环？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：终止条件设计，项目参考里的原题。</p>
+    <p>框架的循环条件只有“响应里还有没有 tool_calls”，没有默认上限，所以要自己加两道保险：工具层的软预算，每轮 N 次，用完返回 BUDGET_EXHAUSTED 这类机器可读的信号，引导模型收尾；循环内侧的硬上限 Advisor，order 放在 ToolCallingAdvisor 之后，每一轮计数，超过就直接返回一个不含 tool_calls 的收尾结果。我在 lab 里验证过：没有保护时模型连续请求工具 15 次，加上限 4 之后第 4 次就收尾。此外还有重复调用检测（同工具同参数连续出现）、总时长和 token 预算、连续失败熔断。</p>
+    <p class="qa-follow">可能的追问：计数器放哪？（通过 advisor 参数按请求传入一个可变计数器；每一轮迭代会复制上下文，但复制的是同一个引用。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ12</span>工具设计有哪些原则？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：工具粒度、安全与可用性。</p>
+    <p>按真实动作划分粒度（查要点、查资料、记证据），不要把一个接口的所有参数都暴露给模型；描述写清什么时候用、不用于什么、返回什么；读写分离，只读工具可以放心重试，写工具要幂等（以业务键覆盖）并可审计；返回值截断、结构化，错误用可读的错误码（NOT_FOUND、INVALID_ARGUMENT、BUDGET_EXHAUSTED），让模型能自行修正；会话 ID、用户 ID 这类身份信息通过 ToolContext 传，不让模型填写；服务端夹紧参数范围。</p>
+    <p class="qa-follow">可能的追问：工具太多怎么办？（按场景只挂需要的，或先检索再挑工具；项目的默认配方就是反面例子。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ13</span>工具调用失败了怎么处理？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：错误分类与恢复。</p>
+    <p>分三类处理。参数错误：返回可读的错误让模型修正，Spring AI 默认就把 ToolExecutionException 转成文本回给模型；临时故障：工具内部对只读操作做有限次重试和超时；不可恢复：返回明确的失败，由循环外的代码决定降级，比如跳过这次查证、直接给出决策。写工具失败要保证不留半截状态。还要防止“失败—重试”把循环拖长，所以失败也要计入预算。</p>
+    <p class="qa-follow">可能的追问：模型给的工具名找不到呢？（框架直接抛 IllegalStateException，常见原因是工具名被截断或模型“改写”了名字。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ14</span>Function Calling 和“在 Prompt 里描述工具、让模型输出 JSON”有什么区别？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题。</p>
+    <p>Function Calling 是模型经过专门训练的能力：工具定义走专门字段，输出是结构化的 tool_calls，客户端能可靠解析，还支持并行调用。在 Prompt 里描述工具，解析靠约定，格式错误更多，也没有协议级的消息结构，好处是兼容性好、完全可控。这个项目的出题其实走的是第三条路：不给模型工具，由代码决定注入什么上下文，确定性最高。</p>
+    <p class="qa-follow">可能的追问：什么时候宁可不用工具？（上下文能提前确定、实时性要求高、需要结果可复现的时候。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ15</span>并行工具调用怎么处理？有什么坑？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：协议细节与并发。</p>
+    <p>模型一次返回多个 tool_calls，客户端执行后按每个 id 回填，全部回填后再请求。坑：每个 tool_call_id 都要有回应，缺一个就可能 400；并发执行时要注意工具的线程安全和共享预算（计数用原子变量）；有依赖关系的调用不能并行，要靠工具描述引导；写工具并发要幂等。Spring AI 的 DefaultToolCallingManager 是按顺序逐个执行同一次响应里的多个调用，再把结果放进同一条 tool 消息。</p>
+    <p class="qa-follow">可能的追问：想真正并发怎么办？（自定义 ToolCallingManager，或在工具内部异步执行，注意超时。）</p>
+  </div>
+</details>
+
+<h2 id="qa-ecosystem">Skills、MCP 与生态</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ16</span>什么是 Agent Skills 的渐进式披露？项目里怎么用的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：概念与实现。</p>
+    <p>三级披露：技能名称和描述常驻上下文（L1），需要时加载 SKILL.md 正文（L2），正文引用的资料和脚本再按需读取（L3）。spring-ai-agent-utils 的 SkillsTool 把它做成一个叫 Skill 的工具：工具描述里用 XML 列出所有技能的 front matter，入参是技能名，返回基础目录加正文，找不到返回 “Skill not found”。L3 要靠文件或 Shell 工具读取，SkillsTool 本身不提供。项目 4 月用它让出题按需加载人设，后来改成后端注入；语音面试仍在用。</p>
+    <p class="qa-follow">可能的追问：语音里用它有什么问题？（每轮无状态，可能重复加载；L3 读不到；自定义方向 custom 找不到技能。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ17</span>渐进式披露一定省 token 吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：用数据说话。</p>
+    <p>不一定。我在 lab 里量过：Skill 工具定义约 2245 字符，cl100k 估算约 895 token，每一次请求都要带；单个 SKILL.md 正文只有 370–601 字符，调用一次工具返回约 277–476 token。常驻的索引比任何一个技能都大，按需加载还要多一次往返。它适合技能多、正文长、有 L3 资源、会话有状态的长任务 Agent；技能少且短的时候，直接注入更省也更快。</p>
+    <p class="qa-follow">可能的追问：怎么让索引变小？（description 写短写准；按场景只挂相关技能；先检索出候选技能再挂。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ18</span>AGENTS.md 和 SKILL.md 的设计原则是什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题。</p>
+    <p>SKILL.md：description 写“什么时候用”，它是模型选择的唯一依据；正文写可执行的规则和检查点，不写背景；大块资料放 L3，但要保证宿主读得到；元数据要短，因为索引每次都付费。AGENTS.md：只放“猜错会出事、代码里看不出来”的规则；能被测试、钩子、CI 强制的规则不要只写成文字；规则随架构变更一起更新。这个仓库的规则文件就有过期内容，还写着 Provider 配置来自 yml、消费者实现 processMessage()，过期的规则会把 Agent 带偏。</p>
+    <p class="qa-follow">可能的追问：规则总被忽略怎么办？（仓库的 CLAUDE.md 说得好：精简规则文件，而不是加粗加感叹号；能机械化的就机械化。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ19</span>MCP 是什么？和 Function Calling 是什么关系？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：协议定位，项目参考里的原题。</p>
+    <p>Model Context Protocol 是一个基于 JSON-RPC 2.0 的开放协议，定义了宿主（IDE、桌面客户端等）、客户端（宿主里与某个 Server 的连接）和服务端（提供能力）三方；服务端暴露 tools、resources、prompts 等能力，客户端一侧还可以提供 sampling 等能力。Function Calling 解决的是模型“说出要调用什么”，MCP 解决的是“工具在哪、怎么被发现和调用”的连接问题：工具实现一次，任何支持 MCP 的宿主都能接入，所以常被比作 AI 的 USB-C。这个项目没有用 MCP。</p>
+    <p class="qa-follow">可能的追问：MCP 的工具最后怎么交给模型？（宿主把 MCP 工具转成模型能理解的工具定义，底层仍是 Function Calling。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ20</span>MCP 的 stdio 和 Streamable HTTP 分别适合什么场景？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题。</p>
+    <p>stdio：宿主把 Server 作为子进程拉起，通过标准输入输出通信，适合本机工具（读本地文件、本地数据库），部署简单、天然隔离、不暴露网络端口，但只能单机使用。Streamable HTTP：远程服务，一个 HTTP 端点同时支持请求响应和流式推送，适合多客户端、需要鉴权、要横向扩展的生产部署，它取代了早期“HTTP + SSE 双端点”的传输方式。我设计的题库 MCP Server 会用 Streamable HTTP。</p>
+    <p class="qa-follow">可能的追问：远程 MCP 怎么鉴权？（OAuth 或每个客户端独立的 token，按客户端限流和审计。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ21</span>如何设计一个生产级的 MCP Server？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题，落到具体例子。</p>
+    <p>拿“题库 MCP Server”举例：工具少而精（抽题、核对要点）；服务端夹紧参数（数量 1–5）；最小暴露（只返回已启用的题，抽题不返回参考答案，核对只返回命中和遗漏的要点）；幂等和超时；结果截断或分页，别撑爆宿主的上下文；鉴权、按客户端限流、审计日志；工具描述版本化；每个工具的调用量、错误率、P99 时延要可观测。Spring AI 里把带 @Tool 的类通过 MethodToolCallbackProvider 注册成 Bean，MCP Server Starter 就会暴露它们，这段草图在 lab 里编译通过。</p>
+    <p class="qa-follow">可能的追问：Resources 和 Tools 怎么选？（只读、可缓存、按 URI 访问的数据用 Resources；有参数、要计算或有副作用的用 Tools。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ22</span>接入第三方 MCP Server 有什么安全风险？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：供应链与间接注入意识。</p>
+    <p>主要有五类：间接注入（外部内容里夹带指令）、工具描述投毒（恶意 Server 在描述里写诱导性指令）、过度权限（给了写权限）、数据外泄（把私有上下文发给不可信的 Server）、供应链风险（Server 版本被篡改）。对策：只接入可信来源并固定版本；只给最小权限（例如只读 token）；外部结果当不可信数据处理，截断、包边界，只在输出会被结构化校验的环节使用；敏感动作需要人确认；每次调用都审计。</p>
+    <p class="qa-follow">可能的追问：项目里有类似的间接注入入口吗？（有，用户上传的知识库资料会进入 RAG 和题库生成的上下文，项目用随机分隔符包裹并做了净化。）</p>
+  </div>
+</details>
+
+<h2 id="qa-memory">记忆与上下文工程</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ23</span>Agent 的记忆怎么分类？这个项目里各对应什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：记忆体系。</p>
+    <p>工作记忆是本次请求的上下文，项目里各处拼装的 Prompt 都有截断上限；会话记忆是多轮历史，文字面试存 Redis 和数据库但不进 Prompt，RAG 用最近 10 条真实消息，语音把历史拼成文本；情节记忆是跨会话发生过什么，项目用最近 10 场面试的 topicSummary 做出题去重；语义记忆是知识，就是 RAG 知识库；程序性记忆是“怎么做事”，对应 Skill 人设和 Prompt 模板；用户画像项目没有，评估报告里有类别分，但没有沉淀下来用于下一次出题。</p>
+    <p class="qa-follow">可能的追问：topicSummary 为什么是好设计？（出题时顺带生成，不额外调用；60 道约 600 token；只放摘要不放原题。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ24</span>多轮对话历史有哪几种传法？RAG 和语音为什么不一样？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：取舍意识。</p>
+    <p>一种是作为真实的 user / assistant 消息数组，RAG 这样做：取最近 10 条已完成的消息，多查一条再丢掉最新的，因为当前这轮已经先落库了。另一种是拼成文本放进一条用户消息，语音这样做：“面试官：……候选人：……”。前者保留角色结构、便于缓存，但不方便逐条净化，混入工具消息还要守协议；后者便于净化、截断和摘要，但角色边界变弱，模型自己上一轮说的话出现在 user 消息里。语音选文本，是因为它要逐条净化语音转写，并做压缩。</p>
+    <p class="qa-follow">可能的追问：文本拼接有注入风险吗？（有，可以伪造“面试官：”行，而净化规则只覆盖英文角色名。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ25</span>Spring AI 的 ChatMemory 怎么用？有什么坑？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：框架细节。</p>
+    <p>MessageWindowChatMemory 保存最近 N 条消息，MessageChatMemoryAdvisor 在请求前注入历史、响应后写回。2.0 有两个坑。一是必须通过 advisors(a -&gt; a.param(ChatMemory.CONVERSATION_ID, id)) 传会话 ID，否则直接断言失败，项目的记忆开关一旦打开，默认配方的所有调用都会报错。二是它的默认 order 是 +200，在工具循环外侧，只在整次调用首尾执行，想让它接管工具回合的历史，要把 order 调到 +300 之后。早期版本有全局默认会话 ID，不传 ID 会串话，这也是项目当初默认关闭它的原因。</p>
+    <p class="qa-follow">可能的追问：多实例部署怎么办？（用 JDBC、Redis 等持久化的记忆存储，按会话 ID 读写。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ26</span>对话越来越长、上下文窗口不够了怎么办？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题。</p>
+    <p>按优先级：先减少不必要的输入（无关的工具定义、冗长的提示词、重复内容）；滑动窗口保留最近 N 轮原文；早期轮次做滚动摘要，攒够一批再增量合并，摊薄调用成本；长期信息放进检索式记忆，需要时再取；大块资料只放摘要或索引，按需加载；最后才是换更长上下文的模型，因为长上下文还有中间遗忘和成本问题。项目的语音压缩器就是“最近 20 轮原文 + 攒够 10 轮再增量摘要”，摘要失败沿用旧摘要。</p>
+    <p class="qa-follow">可能的追问：摘要会丢信息吗？（会，所以要求保留项目、技术栈、已答要点等事实，并保留原文可回查。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ27</span>项目的语音上下文压缩有什么问题？你是怎么发现的？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：测试意识。</p>
+    <p>摘要模板用尖括号写占位符，而 Spring AI 的 PromptTemplate 默认用花括号，变量不会被替换。我在 lab 里直接渲染这个模板：结果里一个变量值都没有，字面量 &lt;newTurns&gt; 还在。开启 SUMMARY 模式后，模型对着空内容生成“摘要”，非空就被持久化，取代早期对话的原文，压缩功能一开启反而丢记忆。压缩器的单测 mock 了模型调用，从来没有渲染过真实模板。修复是改成花括号，并补一个“渲染结果包含变量值”的测试。</p>
+    <p class="qa-follow">可能的追问：为什么一直没被发现？（功能默认关闭；测试只验证调用链；没有针对渲染结果的断言。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ28</span>什么是上下文工程？和 Prompt 工程有什么区别？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：概念与实践。</p>
+    <p>Prompt 工程关注“一段提示词怎么写”；上下文工程关注每一次调用时窗口里放什么、放多少、按什么顺序放、从哪里来：系统提示词、工具定义、检索结果、记忆、历史、输出格式说明都是上下文。这个项目的上下文工程：处处有预算（简历 3000、参考题库 12000、基线 6000 字符等）；topicSummary 压缩历史；探针检索从资料不同侧面取片段；数据边界隔离不可信内容。反面例子：工具定义常驻、人设被标成数据、语音每轮发整份简历。</p>
+    <p class="qa-follow">可能的追问：怎么衡量上下文工程做得好不好？（token 利用率、缓存命中率，以及任务指标随上下文变化的曲线。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ29</span>Token 预算怎么分配？项目里有哪些截断点？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：预算意识。</p>
+    <p>先给输出留足，结构化长输出最容易被截断；再按对任务的边际价值给输入分配：系统指令和格式说明必需，当前任务数据必需，检索与参考资料按质量截断，历史用窗口加摘要，工具定义只挂需要的。项目是每一块单独截断：评估简历 3000、单个参考文件 3000 合计 12000、评估基线 6000、题库上下文 5000、汇总高亮 20 条、改写历史里助手回复 200、重试错误信息 200 字符。缺的是按模型窗口动态计算的总预算，以及对语音简历的截断。</p>
+    <p class="qa-follow">可能的追问：评估为什么要分批？（输出太长 JSON 容易坏，一题出错全场作废；分批把失败限制在一批内。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ30</span>Prompt 缓存怎么利用？布局上要注意什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：成本与时延优化，项目参考里提到的“静态前置”。</p>
+    <p>主流厂商的上下文缓存大多按前缀匹配，所以静态在前、动态在后：系统提示词、工具定义、固定参考资料放前面；用户输入、检索结果、时间戳放后面；前缀里不要放随机值。项目天然有长而稳定的前缀：RAG 系统提示词约 3.5KB、评估系统提示词约 2.6KB；语音每一轮是“系统提示词（含简历）+ 历史只在末尾追加”，前缀逐轮稳定，很适合缓存，能抵消每轮都发简历的成本。Spring AI 2.0 的 Usage 有 getCacheReadInputTokens()，可以统计命中率。</p>
+    <p class="qa-follow">可能的追问：哪些写法会破坏缓存？（前缀里放时间或 UUID、每次调换工具顺序、在系统提示词里拼用户名。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ31</span>什么是上下文污染？项目里有哪些例子？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对“放进去的每样东西都有影响”的认识。</p>
+    <p>无关或冲突的内容会拉低输出质量。项目里有四个例子：默认配方给评估、RAG 挂了无关的 Skill 工具，工具描述还在鼓励调用；可信人设被包进数据边界，与“边界内不执行指令”冲突；语音把“AI 服务暂时不可用”当作面试官发言存进历史，污染了之后的轮次；修复型重试把错误信息回灌，这是有意的，但截断到 200 字符防止堆栈挤占上下文。</p>
+    <p class="qa-follow">可能的追问：怎么发现污染？（做对比实验：去掉某一块上下文看指标变化；检查模型是否引用了不该引用的内容。）</p>
+  </div>
+</details>
+
+<h2 id="qa-rag">RAG</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ32</span>Agentic RAG 和传统 RAG 有什么区别？项目的 RAG 属于哪种？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：演进方向。</p>
+    <p>传统 RAG 是固定流水线：检索一次、拼上下文、生成。Agentic RAG 让模型参与检索决策：要不要检索、检索什么（分解查询）、结果够不够（自检）、要不要换查询再检索、回答引用哪几段。项目的是带改写的传统 RAG：改写，然后依次用“改写版、原问题”检索，第一个有结果的胜出，再生成，外加探测窗口；检索为空直接返回固定文案不调模型，这是一个好的门控。升级方向是检索决策、查询分解、混合召回加重排、带引用的结构化回答、资料不足时最多再检索一次。</p>
+    <p class="qa-follow">可能的追问：代价是什么？（多次调用和时延，所以要有预算，重检索最多一次。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ33</span>查询改写和查询分解分别解决什么问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：检索前处理。</p>
+    <p>改写解决“这句话单独拿去检索找不到”：多轮里的指代（“那它的原理呢”）、过短过泛的查询。分解解决“一个问题需要多份资料”：对比类、多跳问题，拆成子问题并行检索再汇总。项目只做改写，并且把改写版和原问题都当候选依次检索，防止改写跑偏；改写失败就用原问题。代价是每次提问多一次模型调用，可以对“足够长、不含指代词”的问题跳过改写。</p>
+    <p class="qa-follow">可能的追问：改写用什么模型？（小模型就够；项目用的是默认配方，还挂着工具，可以优化。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ34</span>中文场景怎么做混合检索？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的“向量 + BM25 + RRF”，加上中文细节。</p>
+    <p>向量检索擅长语义相近，关键词检索擅长专有名词、型号、错误码这类精确匹配，两者互补。PostgreSQL 自带的全文检索不会切分中文，需要 zhparser、pg_jieba 这类分词扩展，或者用 pg_trgm 做三元组近似匹配，也可以外接搜索引擎加中文分词器。两路结果用倒数排名融合（RRF）合并，只看名次不看分数，不需要把余弦相似度和 BM25 分数归一化，lab 里有实现。融合后再用重排模型精排。</p>
+    <p class="qa-follow">可能的追问：RRF 的 k 取多少？（常见 60，用来削弱头部名次的权重。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ35</span>RAG 线上出现幻觉，排查思路是什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的原题。</p>
+    <p>先定位是检索问题还是生成问题：看这次回答用到的片段里有没有支持答案的内容。检索侧：没召回（分块切断了语义、阈值过高、向量模型不匹配、过滤条件错），或召回了噪声；生成侧：模型忽略资料用了自身知识、错误拼接多个片段、资料本身互相冲突。排查需要日志里记录改写后的查询、每个片段的 id 和分数、最终 Prompt，项目目前只打印了候选查询和命中条数。修复：要求引用片段编号并校验、资料不足时明确说明、控制片段数量并按相关度排序。</p>
+    <p class="qa-follow">可能的追问：项目本身做了哪些防幻觉措施？（检索为空不调模型；系统提示词要求只依据资料回答；探测窗口截断客套的拒答。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ36</span>怎么评估 RAG 的效果？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：评测意识。</p>
+    <p>分两段评。检索看 recall@k、MRR，需要“问题 + 标注相关片段”的金标集；生成看忠实度（回答是否被检索片段支持）、答案相关性、引用可验证率、拒答率，忠实度可以用 LLM 评委打分再人工抽检。项目目前没有任何 RAG 评测，按长度调阈值、800 token 分块这些参数都没有数据支撑；而且配置和代码的默认值还不一致，yml 里的 0.18 覆盖了代码里改成 0.25 的意图。</p>
+    <p class="qa-follow">可能的追问：金标集多大？（起步 50–100 个问题，覆盖短查询、长查询、多轮指代和无答案的问题。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ37</span>检索不到或资料不足时怎么处理？项目的“探测窗口”有什么问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：拒答设计。</p>
+    <p>项目有两层：检索为空直接返回固定文案，不调模型；有检索结果时，流式输出的前 120 字先进探测窗口，出现“没有找到相关信息”“信息不足”等短语就换成固定回复并取消上游。问题是关键词判断会误伤“部分能答、部分信息不足”的正常回答，而系统提示词恰恰要求模型在资料不全时说明缺失。更好的做法是让模型输出结构化的“资料是否足够”标记和引用列表，由代码决定怎么展示；不足时最多再检索一次。</p>
+    <p class="qa-follow">可能的追问：流式场景怎么拿到结构化标记？（先输出一个短的状态行，或先非流式判断再流式生成。）</p>
+  </div>
+</details>
+
+<h2 id="qa-reliability">结构化输出与可靠性</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ38</span>怎么让模型稳定输出合法的 JSON？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：结构化输出工程。</p>
+    <p>项目有三层：BeanOutputConverter 生成 JSON Schema 格式说明拼到系统提示词；validateSchema() 插入校验 Advisor，失败就把错误追加到用户消息重试；外层 invoker 用“修复型系统提示词”（严格 JSON 指令 + 截断到 200 字的上次错误）再试。关闭校验时还有本地修复：用一个小状态机给字符串里没转义的引号补转义。再往上一步，对支持原生 JSON Schema 输出的厂商用 useProviderStructuredOutput()，把约束下沉到解码阶段。最重要的是业务上不信模型的数字：总分、题量都由代码计算。</p>
+    <p class="qa-follow">可能的追问：JSON Mode 和 Schema 约束有什么区别？（JSON Mode 只保证是合法 JSON，不保证字段和类型符合结构。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ39</span>项目的重试会被放大吗？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对“隐藏循环”的敏感度。</p>
+    <p>会。项目把 spring.ai.retry.max-attempts 设为 1，想避免两层重试相乘，但 validateSchema() 插入的校验 Advisor 自带最多 3 次重复，和外层的 2 次相乘。我在 lab 里让模型一直返回非法 JSON，一次调用请求了 8 次模型；而项目的尝试次数指标只统计外层，显示的是 2。修复是只保留一层带错误反馈的重试并设总预算，指标改为统计真实请求。还要注意，工具循环的每一轮也会穿过这个校验 Advisor。</p>
+    <p class="qa-follow">可能的追问：校验次数能配吗？（validateSchema() 用默认值；要调整就不用这个开关，自己按次数把 StructuredOutputValidationAdvisor 加到链上。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ40</span>降级和失败的边界在哪？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：失败语义。</p>
+    <p>结果仍然有意义时降级，结果会误导用户时失败。项目里的好例子：评估某一批失败按 0 分并注明“未生成”，汇总失败退回批次结论拼接，改写失败用原问题。坏例子：简历分析失败返回 0 分报告并标记完成，重试和“重新分析”入口全部失效；语音把错误提示当面试官的话念出来。原则是降级要可见（标记、计数），失败要能重试。护栏误伤导致的整批 0 分（E5）表面上是降级，实际上是错误结果。</p>
+    <p class="qa-follow">可能的追问：怎么让降级可见？（结果里带降级标记、打指标、前端明确提示。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ41</span>为什么说“模型负责判断，代码负责算术和不变量”？举例。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：人机分工。</p>
+    <p>模型擅长语义判断，不擅长精确计数、算术和引用系统里真实存在的 ID。项目里：总分由代码对逐题分数求平均，不采用模型给的 overallScore；未作答强制 0 分；题量由代码截断；JD 类目 key 由代码清洗，参考文件名用本地映射覆盖模型给的值；题库去重由代码做 Unicode 规范化后比较。反例是逐题结果按位置对齐而不按 questionIndex，模型漏一题就整体错位，这等于把“对齐”这种代码该做的事交给了隐式约定。</p>
+    <p class="qa-follow">可能的追问：还有什么该拿回代码？（时间计算。日程解析里“明天下午两点”由模型换算，代码应该复核。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ42</span>Agent 任务执行到一半进程崩了，怎么办？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：持久化执行。</p>
+    <p>每一步的状态落库（检查点），任务由至少一次投递的队列驱动，崩溃后从最后一个检查点续跑；工具和写操作幂等，重放不会重复执行；围栏令牌保证旧执行的结果作废；步数、token、时长三重上限。项目的异步管线已经有这些要素：Stream 消费者组加 pending 回收和恢复调度、状态字段、taskId 围栏、唯一索引幂等。迁移到 Agent 时，要把“每一步调了什么工具、结果是什么”也落库。</p>
+    <p class="qa-follow">可能的追问：用现成框架吗？（工作流引擎或带检查点的编排框架能省掉很多样板，原理相同。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ43</span>为什么不能在事务里调模型？工具里的写操作怎么保证幂等？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：事务边界与幂等。</p>
+    <p>事务期间占着数据库连接和行锁，模型调用十几秒，连接池会被耗尽、其他请求被阻塞，而且外部调用不能随事务回滚。项目把模型调用放在事务外，只把最后的写入放进短事务，比如向量的影子提升、题库的替换加完成。写工具的幂等：以业务键覆盖（记证据以题号为键）、请求带幂等键、数据库唯一约束兜底、状态迁移用比较后更新。</p>
+    <p class="qa-follow">可能的追问：跨多个工具的一致性怎么保证？（用状态机和补偿，而不是长事务。）</p>
+  </div>
+</details>
+
+<h2 id="qa-eval">评估与质量</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ44</span>LLM-as-a-judge 有哪些偏差？项目的评估引擎暴露在哪些偏差下？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：评估的可信度。</p>
+    <p>常见的有位置偏差、冗长偏好、自我偏好、宽严漂移和不稳定。项目的暴露面：评委人设对 10 个方向都是“资深 Java 后端专家”，深度维度写的是源码和并发模型，前端、算法、Agent 方向用的是错位的量表；逐题结果按位置对齐；语音回答天然更短，可能受冗长偏好影响（推测）；出题和评估常用同一个 Provider；单次采样，没有测过方差；还有护栏误伤这种与回答质量无关的因素。已有的缓解是量表、分数区间、无效回答 0 分规则、参考基线校准和代码算总分。</p>
+    <p class="qa-follow">可能的追问：怎么降方差？（温度调低、多次采样取中位数、改成清单式打分。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ45</span>怎么评估“评委”本身靠不靠谱？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：元评估。</p>
+    <p>建金标集，每个方向 30–50 条人工分，覆盖好、中、差和“不知道”；看平均绝对误差、±10 分内一致率和 Spearman 秩相关，秩相关回答的是“好答案是否排在前面”；测稳定性（同一批跑 3 次）和位置偏差（打乱批内顺序）；每次改 Prompt、模型或批大小都回归。lab 里的 JudgeAgreement 给出了计算方法。人工标注本身也要有一致性，两人标注算一致率，否则金标集不可信。</p>
+    <p class="qa-follow">可能的追问：评委和人工不一致时信谁？（先判断是评委错还是标注模糊，模糊的题改量表或删掉。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ46</span>离线评测集怎么建？要覆盖哪些样本？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：评测工程。</p>
+    <p>来源是脱敏后的真实使用数据加人工构造的边界样本。覆盖各方向、各难度；好、中、差回答；空回答和“不知道”；超长回答；含注入话术但回答正确的样本（正好覆盖 E5 的误伤）；多轮指代的 RAG 问题；没有答案的问题。每条带期望输出或人工分，以及标注依据。评测集版本化存进仓库，和 Prompt 一起演进；定期从线上抽新样本补充，防止过拟合。</p>
+    <p class="qa-follow">可能的追问：怎么防止为评测集调参？（留出一部分只在发布前跑。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ47</span>改了 Prompt，怎么知道是变好还是变坏？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Prompt 工程化。</p>
+    <p>把 Prompt 当代码：模板在 Git 里，改动走评审；每次调用打上模板版本标签；CI 分两层，快层用假模型验证渲染、结构和流程，确定、秒级、每个 PR 都跑，摘要模板那种 bug 在这一层就能拦住；慢层用真实模型跑金标集，每晚一次，输出指标和上一次的差异，退化就不合入。上线时新旧 Prompt 按比例灰度，对比线上指标。</p>
+    <p class="qa-follow">可能的追问：真实模型有随机性怎么比？（多次采样看均值和置信区间，样本量要够，温度固定。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ48</span>评估分批合并有什么隐患？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：对“结构合法但语义错”的敏感度。</p>
+    <p>合并时按列表位置取第 i 个结果，而不是按模型返回的 questionIndex 对齐。模型漏评一题或打乱顺序，后面每一题的分数和反馈都会错位，Schema 校验发现不了，因为结构完全合法。修复是按 questionIndex 建映射，检查数量和编号覆盖，缺失的题补评或标记。另外各批之间互相独立，现在却是串行执行，可以并行缩短评估时间。</p>
+    <p class="qa-follow">可能的追问：批次之间还有什么一致性问题？（各批评语口径不一，所以才需要二次汇总。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ49</span>怎么评估一个 Agent，而不是一次模型调用？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：Agent 评测的维度。</p>
+    <p>分三层：结果，看任务成功率和最终输出质量，比如追问命中率；过程，看轨迹是否合理，工具调用次数、有没有重复调用、是否在预算内结束、循环保护触发率；成本与体验，看 token、时延和失败率。方法上：录制真实会话做回放，人工标注关键决策点；用假模型测框架行为（lab 的做法）；用真实模型跑金标集。Agent 的非确定性更强，要多次运行看分布，而不是看单次结果。</p>
+    <p class="qa-follow">可能的追问：轨迹怎么评？（和参考轨迹比对关键步骤，或用评委判断每一步是否必要。）</p>
+  </div>
+</details>
+
+<h2 id="qa-security">安全与护栏</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ50</span>Prompt 注入有哪些类型？怎么防？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的“攻击类型与防御”。</p>
+    <p>类型：直接注入（用户输入里写“忽略之前的指令”）、间接注入（藏在检索资料、网页、工具结果里）、角色伪造、分隔符伪造、套取系统提示词。项目的防御：输入净化、随机 UUID 边界标签、系统提示词声明数据边界、SafeGuard 关键词闸门；最根本的是模型输出只当数据用，而且没有写工具。更完整的防御还要：可信与不可信内容分开放、最小权限、输出侧检测、敏感动作人工确认、审计。</p>
+    <p class="qa-follow">可能的追问：间接注入在这个项目的入口？（用户上传的知识库资料进入 RAG 和题库生成。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ51</span>关键词护栏有什么问题？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：护栏的误报与漏报。</p>
+    <p>两个问题：容易绕过（换个说法、改大小写、夹字，SafeGuard 是区分大小写的子串匹配）；误伤严重。我在 lab 里按项目默认词表复现：候选人在 Prompt 注入题里引用“忽略之前的指令”，SafeGuard 拦截、模型请求 0 次、两次重试都失败，整批最多 8 题按 0 分兜底；知识库资料里有这个短语，RAG 直接拒答；语音里候选人说“新的角色是”，固定回复被当作面试官的话念出来并存档。而项目恰好有一个 AI Agent 方向会考注入。改法：关键词只打标签不拒绝，护栏移到输出侧，靠结构化输出和最小权限兜底。</p>
+    <p class="qa-follow">可能的追问：输出侧检查什么？（角色被劫持的话术、系统提示词里独有的标记是否被复述、敏感信息。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ52</span>Agent 的权限边界怎么设计？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的“最小权限、敏感操作审批”。</p>
+    <p>最小权限：Agent 只拿完成任务需要的工具，默认只读；写工具幂等、可审计、有额度；高风险动作（删除、发送、付费）需要人确认；工具参数由服务端夹紧；身份信息通过 ToolContext 传，不让模型填；按用户隔离数据，这一点项目没有用户体系，是前提缺口。这个项目真正的安全边界就是“只有一个只读工具”：注入成功最坏只污染一次输出。</p>
+    <p class="qa-follow">可能的追问：人工确认怎么做？（工具返回“待确认”状态，由界面让用户确认后再执行，而不是让模型自己决定。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ53</span>对照 OWASP LLM Top 10，这个项目哪些做得好，哪些是缺口？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：安全体系化。</p>
+    <p>做得好的：不当输出处理（结构化校验后入库，前端渲染 Markdown 时没有开启原始 HTML）、过度代理（只有只读工具）。部分满足：提示词注入（有防御但会误伤）、无界消耗（有限流，但重试可放大 8 倍，工具循环没有上限）、敏感信息泄露（简历全文发给第三方模型，没有脱敏和保留策略）。缺口：系统提示词泄露（没有输出侧检测）、向量与嵌入（没有用户隔离）。</p>
+    <p class="qa-follow">可能的追问：先补哪个？（无界消耗和敏感信息：一个影响成本，一个影响合规。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ54</span>简历这种敏感数据发给第三方模型，要注意什么？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：数据合规。</p>
+    <p>最小化，只发送任务需要的部分（评估截断到 3000 字符，但语音每轮发全文）；进 Prompt 之前脱敏手机号、邮箱、证件号；选择有数据保护承诺的 Provider，关注是否用于训练、数据驻留地区；日志不记原文，项目的净化日志只记录文本长度，这点是对的；存储加密，设保留期限和删除入口；多用户隔离。</p>
+    <p class="qa-follow">可能的追问：脱敏会影响评估质量吗？（联系方式对评估没用；公司名、项目名一般保留。）</p>
+  </div>
+</details>
+
+<h2 id="qa-realtime">实时、性能与成本</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ55</span>实时语音 Agent 的时延预算怎么拆？项目怎么优化首响？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：流水线思维，项目参考里的 TTFT、P99。</p>
+    <p>级联架构的时延 = 说完到提交 + 提交到首 token + 首 token 到首句 + 首句合成 + 播放。项目的优化：模型流式输出，按句切分并发合成（上限 3），有序发射器保证顺序，首句往往在模型没说完时就开始播放；开场白音频缓存；虚拟线程承载阻塞的 SDK 调用。还能继续做：去掉每轮可能发生的 Skill 工具往返；首句在逗号处先切；复用 TTS 连接（现在每句新建一条，要握手）；补“首段音频到达浏览器”的端到端指标。</p>
+    <p class="qa-follow">可能的追问：为什么不用端到端语音模型？（需要文字记录做评估、要能任意换聊天模型、要在文本层做净化截断；代价是时延叠加、不支持打断。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ56</span>工具调用对时延有什么影响？语音里该不该用工具？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：实时路径上的工具取舍。</p>
+    <p>每次工具调用等于多一次带全部上下文的模型请求，再加上工具执行时间。语音里模型每一轮可能先调 Skill 加载人设，首 token 被推迟一次往返，请求里还要多带约 895 token 的工具定义。实时路径的原则：能提前确定的上下文由代码预取、直接注入，工具留给文字模式和异步任务。项目的首 token 指标会把这次往返算进去，所以“去掉工具”前后对比很容易看出效果。</p>
+    <p class="qa-follow">可能的追问：非用工具不可怎么办？（并行预取、用小模型做工具选择、流式里先说一句过渡语。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ57</span>LLM 应用的成本怎么控制，又怎么观测？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的“成本优化”。</p>
+    <p>控制：输入截断（项目里到处都有）；减少调用（检索为空不调模型、拒答提前截断、规则优先模型兜底）；模型分级（改写、分类用小模型）；缓存（前缀缓存、结果缓存）；限流；重试预算（避免 8 倍放大）；只挂需要的工具。观测：按 Provider 和场景统计输入、输出、缓存 token 和真实请求次数，折算费用，按用户和功能出报表。项目目前没有这些，lab 里的 TokenUsageAdvisor 放在工具循环内侧，能准确计数。</p>
+    <p class="qa-follow">可能的追问：一场面试大概多少次调用？（文字面试：出题 1–2 次；评估按每 8 题一批，再加 1 次汇总；另有重试和降级的可能。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ58</span>多 Provider 的模型路由和故障切换怎么做？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：路由与降级设计。</p>
+    <p>项目现在的做法：所有厂商走 OpenAI 兼容协议，注册表按 Provider 缓存模型实例，按用途组装三种客户端，设置页热切换，会话记录所选的 Provider；缺的是自动故障切换和按任务路由。设计上：按任务选模型，改写和分类用小模型，评估用强模型；主备 Provider，超时或 5xx 时切换，用错误率和时延做熔断；向量模型不能随意切换，维度和向量空间都不同；工具调用、结构化输出在不同厂商上的行为要逐个验证，项目在这上面吃过亏。</p>
+    <p class="qa-follow">可能的追问：切换时会话中途换模型有什么问题？（风格和评分口径不一致，所以评估要固定用同一个模型。）</p>
+  </div>
+</details>
+
+<h2 id="qa-scenario">场景与综合</h2>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ59</span>线上 Agent 出现“幻觉循环”，反复调用同一个工具，你怎么排查？</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：项目参考里的场景题。</p>
+    <p>先看轨迹：每一轮的工具名、参数、结果，这需要工具调用的 Observation 或日志。再逐项排查：工具结果对模型是否“不可用”（错误不可读、结果被截断、返回空）；上下文是否丢了，模型根本不知道自己已经调过，工具回合历史被截断就是这种形态（A01）；工具描述是否含糊，模型不知道什么时候该停；预算和终止条件是否存在。修复：修历史，把工具返回改成可读的信号，加重复调用检测和预算，硬上限兜底。</p>
+    <p class="qa-follow">可能的追问：怎么防患于未然？（循环保护、重复调用检测，以及按场景的步数分布告警。）</p>
+  </div>
+</details>
+
+<details class="qa" open>
+  <summary><span class="q-no">AQ60</span>讲一个你在这个项目上最有收获的排查经历。</summary>
+  <div class="qa-body">
+    <p class="qa-focus">考察点：STAR 表达与方法论。</p>
+    <p>情境：项目把放弃工具调用归因于多厂商兼容性，而默认配方今天仍然挂着工具。任务：判断这个结论是否成立。行动：读 ToolCallingAdvisor 源码，发现历史开关的语义；用会调用工具的假模型复刻项目的 Advisor 组合，打印每一轮的消息；下载当时的 2.0.0-M4 源码核对同一段逻辑；把提交时间线对齐。结果：第二轮只有 SYSTEM 和 TOOL，根因是配置；修复是删掉手动注册并去掉默认配方的工具；实验留作框架升级的回归用例。收获是先抓报文、做最小复现再下结论，“兼容性问题”往往是自己的问题。</p>
+    <p class="qa-follow">可能的追问：怎么确定当时线上就是这个原因？（诚实回答：无法回放线上请求，是证据充分的推断，三条证据相互印证；下一步可以用真实 Provider 打开日志 Advisor 验证。）</p>
+  </div>
+</details>
+    <nav class="pager" aria-label="上一页与下一页">
+      <a class="prev" href="agent-upgrade.html"><span class="dir">上一页</span><span class="ttl">Agent 化改造方案</span></a>
+      <a class="next" href="agent-cheatsheet.html"><span class="dir">下一页</span><span class="ttl">考前速记</span></a>
+    </nav>
+  </main>
+</div>
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    <span>InterviewGuide 项目拆解 · 基于 commit b2d1ca0（2026-08-14）的源码阅读整理</span>
+    <span>原项目采用 AGPL-3.0 协议 · 本站内容用于学习与面试准备</span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>

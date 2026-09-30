@@ -316,6 +316,7 @@
       <tr><td>Hooks</td><td>编辑 Java 文件后自动编译、编辑前端文件后自动类型检查；禁止读写 <code>.env</code>；拦截对 <code>db/migration</code> 下已发布脚本的修改。和 Git 钩子、CI 一起构成“机械约束”。</td></tr>
       <tr><td>Skills</td><td>把重复的流程做成技能，例如“新增一条 Stream 管线”“写 TDD 证据文档”。有意思的是，这个项目的面试方向本身也用了 SKILL.md 格式。</td></tr>
       <tr><td>MCP</td><td>Playwright MCP 在浏览器里验收页面和语音流程（仓库忽略了它的输出目录）；GitHub MCP 管理 PR；也可以接数据库只读查询来核对迁移结果。</td></tr>
+      <tr><td>最小实验工程</td><td>对框架行为有疑问时，让 Agent 写一个独立的小工程，用假模型复刻项目的配置并打印每一轮请求，而不是在业务代码里反复试错。本站的 <a href="agent-lab.html">源码实验</a> 就是这样做出来的。</td></tr>
       <tr><td>检查点与回退</td><td>Agent 在错误方向上走远时直接回退到计划阶段，而不是在错误方案上继续打补丁。</td></tr>
       <tr><td>无头模式与 CI 集成</td><td>在 PR 上自动运行审查提示词，把结果作为评论，让人把精力放在判断而不是找问题上。</td></tr>
     </tbody>
@@ -336,7 +337,7 @@
       <tr>
         <td>先上了“更 Agent”的方案，又退了回来</td>
         <td><span class="sha">884855d</span> 引入工具调用按需加载 Skill，<span class="sha">2b4a72f</span>、<span class="sha">5793f36</span> 陆续打补丁，<span class="sha">d0e7c41</span> 最终改回直接注入，原因是多厂商对工具调用的兼容性不一致。</td>
-        <td>架构级的选择先做小规模验证（在所有目标 Provider 上跑通），再大面积铺开。</td>
+        <td>架构级的选择先做小规模验证（在所有目标 Provider 上跑通），再大面积铺开；遇到“兼容性”问题先抓真实请求报文。同一时期手动注册的 ToolCallAdvisor 关闭了内部历史，工具回合只发系统消息和工具结果，这更可能是根因，见 <a href="agent-lab.html#root-cause">根因复盘</a>。</td>
       </tr>
       <tr>
         <td>“清理遗留代码”删掉了迁移脚本</td>

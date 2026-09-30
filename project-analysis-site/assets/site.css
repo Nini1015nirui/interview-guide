@@ -209,21 +209,80 @@ a:hover {
   text-overflow: ellipsis;
 }
 
+.crumb {
+  display: none;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (min-width: 720px) {
+  .crumb {
+    display: inline;
+  }
+}
+
+/* 页面多于一行能放下的数量：所有宽度都用“页面”按钮展开的分组面板 */
 .sitenav {
-  margin-left: auto;
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  padding: 14px var(--gutter) 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  max-height: calc(100vh - var(--topbar-h));
+  overflow-y: auto;
+}
+
+.sitenav.open {
   display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .nav-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
 
 .nav-group-label {
-  display: none;
+  display: block;
+  flex-basis: 100%;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+@media (min-width: 900px) {
+  .sitenav.open {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px 24px;
+    padding-top: 18px;
+    border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    border-radius: 0 0 12px 12px;
+  }
+
+  .nav-group {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+
+  .nav-group-label {
+    flex-basis: auto;
+    margin-bottom: 4px;
+  }
 }
 
 .sitenav a {
@@ -248,10 +307,7 @@ a:hover {
 }
 
 .nav-sep {
-  width: 1px;
-  height: 18px;
-  background: var(--line);
-  margin: 0 6px;
+  display: none;
 }
 
 .icon-btn {
@@ -273,53 +329,8 @@ a:hover {
 }
 
 .nav-toggle {
-  display: none;
-}
-
-@media (max-width: 1239px) {
-  .nav-toggle {
-    display: inline-flex;
-    margin-left: auto;
-  }
-
-  .sitenav {
-    display: none;
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    margin: 0;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 14px;
-    padding: 14px var(--gutter) 20px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--line);
-    box-shadow: var(--shadow);
-    max-height: calc(100vh - var(--topbar-h));
-    overflow-y: auto;
-  }
-
-  .sitenav.open {
-    display: flex;
-  }
-
-  .nav-group {
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-
-  .nav-group-label {
-    display: block;
-    flex-basis: 100%;
-    font-size: 0.75rem;
-    letter-spacing: 0.08em;
-    color: var(--ink-3);
-  }
-
-  .nav-sep {
-    display: none;
-  }
+  display: inline-flex;
+  margin-left: auto;
 }
 
 @media (max-width: 480px) {

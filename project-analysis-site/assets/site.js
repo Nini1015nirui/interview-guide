@@ -1,4 +1,4 @@
-/* InterviewGuide 项目拆解 · 站点脚本：主题切换、移动端导航、本页目录、问答自测、复制提示词 */
+/* InterviewGuide 项目拆解 · 站点脚本：主题切换、页面导航面板、本页目录、问答自测、复制提示词 */
 (function () {
   "use strict";
 
@@ -50,14 +50,28 @@
     syncThemeButton();
   }
 
-  /* 移动端导航 */
+  /* 页面导航面板：所有宽度都通过“页面”按钮展开，Esc 或点击面板外关闭 */
   var navBtn = document.querySelector("[data-nav-toggle]");
   var nav = document.getElementById("sitenav");
   if (navBtn && nav) {
-    navBtn.addEventListener("click", function () {
-      var open = nav.classList.toggle("open");
+    var setNavOpen = function (open) {
+      nav.classList.toggle("open", open);
       navBtn.setAttribute("aria-expanded", open ? "true" : "false");
       navBtn.textContent = open ? "关闭" : "页面";
+    };
+    navBtn.addEventListener("click", function () {
+      setNavOpen(!nav.classList.contains("open"));
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && nav.classList.contains("open")) {
+        setNavOpen(false);
+        navBtn.focus();
+      }
+    });
+    document.addEventListener("click", function (event) {
+      if (nav.classList.contains("open") && !nav.contains(event.target) && !navBtn.contains(event.target)) {
+        setNavOpen(false);
+      }
     });
   }
 

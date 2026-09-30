@@ -22,6 +22,8 @@
     <nav class="sitenav" id="sitenav" aria-label="站点导航">
       <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html" aria-current="page">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">Agent 专题</span><a href="agent-overview.html">Agent 总览</a><a href="agent-mechanics.html">机制拆解</a><a href="agent-lab.html">源码实验</a><a href="agent-upgrade.html">改造方案</a><a href="agent-qa.html">Agent 题库</a><a href="agent-cheatsheet.html">考前速记</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
       <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html">简历与讲述</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
       <div class="nav-group"><span class="nav-group-label">AI 编码</span><a href="vibe-coding.html">Claude Code 复刻</a></div>
@@ -37,11 +39,11 @@
 <header class="page-head">
   <p class="eyebrow">项目解析 · 总览</p>
   <h1>InterviewGuide 智能面试平台：一份基于源码的项目拆解</h1>
-  <p class="lead">一个 Spring Boot 4 + Java 25 + Spring AI 2.0 + React 18 的全栈 AI 应用，覆盖简历分析、文字与语音模拟面试、RAG 知识库问答、知识库题库面试、面试日程和多模型管理。本站按模块拆开它的设计取舍、可靠性手段和真实演进过程，再整理成面试可以直接使用的问答、简历写法，以及一条用 Claude Code 从零复刻它的路线。</p>
+  <p class="lead">一个 Spring Boot 4 + Java 25 + Spring AI 2.0 + React 18 的全栈 AI 应用，覆盖简历分析、文字与语音模拟面试、RAG 知识库问答、知识库题库面试、面试日程和多模型管理。本站按模块拆开它的设计取舍、可靠性手段和真实演进过程，再整理成面试可以直接使用的问答、简历写法，以及一条用 Claude Code 从零复刻它的路线。面 Agent 应用开发岗的读者，另有一组 <a href="agent-overview.html">Agent 专题</a>：用 Agent 的尺子重新审视项目，并用 8 个可复现的源码实验验证框架的真实行为。</p>
   <div class="meta-row">
     <span>源码基线：commit <span class="sha">b2d1ca0</span>（2026-08-14）</span>
     <span>102 次提交 · 6 位贡献者</span>
-    <span>全站精读约 2–3 小时</span>
+    <span>17 页 · 全站精读约 4 小时</span>
   </div>
 </header>
 
@@ -219,6 +221,12 @@
   <li><strong>实时语音链路</strong>：手动提交代替自动断句、三层回声防护、迟到字幕隔离、LLM 流式输出按句切分并发合成、按序号有序下发音频。见 <a href="voice.html">语音面试</a>。</li>
   <li><strong>Prompt 注入三层防御</strong>：输入净化加随机分隔符、系统提示词声明数据边界、请求前 SafeGuard 关键词闸门，外加“模型输出只当数据用”。见 <a href="ai-foundation.html#prompt-injection">AI 底座</a>。</li>
 </ul>
+<p>面 Agent 岗时，下面三条是本站实验验证过、别人很少讲得出的内容：</p>
+<ul>
+  <li><strong>工具调用“不兼容”的真正原因</strong>：默认配方关掉了 ToolCallingAdvisor 的内部历史又没有记忆 Advisor，工具回合的第二轮只发系统消息和工具结果。见 <a href="agent-lab.html#root-cause">源码实验 · 根因复盘</a>。</li>
+  <li><strong>渐进式披露的真实成本</strong>：Skill 工具定义约 895 token，比任何一个技能正文都大。见 <a href="agent-mechanics.html#skills-cost">机制拆解 · Skills</a>。</li>
+  <li><strong>护栏误伤与重试放大</strong>：引用注入话术的正确回答会让整批评估得 0 分；一次结构化调用最坏请求模型 8 次。见 <a href="agent-lab.html#findings">Agent 专项发现</a>。</li>
+</ul>
 
 <h2 id="how-to-read">怎么读这个站</h2>
 <div class="split">
@@ -238,6 +246,14 @@
     <h4>面 AI 应用开发岗</h4>
     <p class="small">重点读 <a href="ai-foundation.html">AI 底座</a>、<a href="modules.html#rag">RAG</a>、<a href="voice.html">语音面试</a>，以及问答页的“大模型工程”分组。</p>
   </div>
+  <div>
+    <h4>面 Agent 应用开发岗</h4>
+    <p class="small"><a href="agent-overview.html">Agent 总览</a> → <a href="agent-mechanics.html">机制拆解</a> → <a href="agent-lab.html">源码实验</a> → <a href="agent-upgrade.html">改造方案</a> → <a href="agent-qa.html">Agent 题库</a> 自测；面试前看 <a href="agent-cheatsheet.html">考前速记</a>。</p>
+  </div>
+  <div>
+    <h4>想亲手验证</h4>
+    <p class="small">进入仓库的 <code>project-analysis-site/lab</code> 执行 <code>./run.sh</code>，不需要 API Key 就能复现 8 个实验，见 <a href="agent-lab.html#run">如何运行</a>。</p>
+  </div>
 </div>
 
 <h2 id="pages">页面索引</h2>
@@ -249,13 +265,19 @@
   <a class="card" href="voice.html"><span class="card-kicker">项目解析</span><span class="card-title">实时语音面试链路</span><span class="card-desc">从麦克风到扬声器的完整时序与每一个坑</span></a>
   <a class="card" href="frontend.html"><span class="card-kicker">项目解析</span><span class="card-title">前端工程实现</span><span class="card-desc">API 层、SSE 客户端、音频采集与播放、轮询、测试</span></a>
   <a class="card" href="quality.html"><span class="card-kicker">项目解析</span><span class="card-title">测试、CI 与代码审查</span><span class="card-desc">测试策略、TDD 证据、18 条审查发现与修复建议</span></a>
+  <a class="card" href="agent-overview.html"><span class="card-kicker">Agent 专题</span><span class="card-title">Agent 视角总览</span><span class="card-desc">12 个模型调用点、工作流与 Agent 模式对照、Harness 六层审计</span></a>
+  <a class="card" href="agent-mechanics.html"><span class="card-kicker">Agent 专题</span><span class="card-title">Agent 核心机制拆解</span><span class="card-desc">工具循环源码、Skills 成本、记忆、上下文、结构化、护栏、评委</span></a>
+  <a class="card" href="agent-lab.html"><span class="card-kicker">Agent 专题</span><span class="card-title">源码实验与专项发现</span><span class="card-desc">8 个可复现实验、12 条专项发现、根因复盘</span></a>
+  <a class="card" href="agent-upgrade.html"><span class="card-kicker">Agent 专题</span><span class="card-title">Agent 化改造方案</span><span class="card-desc">修地基、评测、追问决策 Agent、Agentic RAG、MCP、长期记忆</span></a>
+  <a class="card" href="agent-qa.html"><span class="card-kicker">Agent 专题</span><span class="card-title">Agent 面试题库</span><span class="card-desc">60 道结合源码与实验的追问与参考回答</span></a>
+  <a class="card" href="agent-cheatsheet.html"><span class="card-kicker">Agent 专题</span><span class="card-title">考前速记</span><span class="card-desc">全站压缩成一页：数字、图、结论、答案、故事</span></a>
   <a class="card" href="interview-qa.html"><span class="card-kicker">面试准备</span><span class="card-title">面试高频问答</span><span class="card-desc">按主题分组的追问与参考回答，支持自测模式</span></a>
   <a class="card" href="resume.html"><span class="card-kicker">面试准备</span><span class="card-title">简历写法与讲述脚本</span><span class="card-desc">简历条目、STAR 故事、1/3/10 分钟讲法、质疑应对</span></a>
   <a class="card" href="vibe-coding.html"><span class="card-kicker">AI 编码</span><span class="card-title">用 Claude Code 从零构建</span><span class="card-desc">仓库里的 AI 协作证据、上下文工程、分阶段路线与提示词</span></a>
 </div>
 
 <h2 id="about">关于这份拆解</h2>
-<p>写作依据是完整阅读仓库源码（后端、前端、测试、配置、迁移脚本、Prompt、Skill 文件）、全部 102 条提交说明、<code>.claude/tdd</code> 下的 4 份 TDD 证据文档和 <code>docs/testing</code> 下的 2 份测试记录。文中提到的类名、配置项和数值都以 commit <span class="sha">b2d1ca0</span> 为准；提交号用虚线框标出，方便你回到仓库核对。</p>
+<p>写作依据是完整阅读仓库源码（后端、前端、测试、配置、迁移脚本、Prompt、Skill 文件）、全部 102 条提交说明、<code>.claude/tdd</code> 下的 4 份 TDD 证据文档和 <code>docs/testing</code> 下的 2 份测试记录。Agent 专题另外对照了 Spring AI 2.0.0、2.0.0-M4 和 spring-ai-agent-utils 0.10.0 的框架源码，并在与项目相同的版本上运行了 8 个最小实验。文中提到的类名、配置项和数值都以 commit <span class="sha">b2d1ca0</span> 为准；提交号用虚线框标出，方便你回到仓库核对。</p>
 <div class="callout risk">
   <span class="label">诚实使用</span>
   <p>InterviewGuide 是公开的开源项目（原作者 Guide，AGPL-3.0），不少同学拿它做项目经历，面试官很可能见过。把它写进简历时，要讲清楚你自己的理解、改动和取舍，不要把全部设计说成独立完成。<a href="resume.html#honesty">简历与讲述</a> 一页专门讲了怎么讲出差异化，<a href="quality.html#findings">代码审查发现</a> 里的问题可以作为你亲手改进的切入点。</p>

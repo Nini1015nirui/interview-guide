@@ -1,0 +1,351 @@
+<header class="page-head">
+  <p class="eyebrow">Agent 专题 · 改造方案</p>
+  <h1>Agent 化改造：先修地基，再给模型决策权</h1>
+  <p class="lead">这一页给出把项目往 Agent 方向推进的完整方案：先用一两天修掉会让 Agent 能力失真的地基问题，再依次做追问决策 Agent、Agentic RAG、MCP、多评委评估和长期记忆，并用评测和可观测把每一步的效果量化。每个方案都写明动机、设计、关键代码、风险和面试讲法；文中的代码草图都在与项目相同的 Spring AI 2.0.0 上编译通过，放在 <code>project-analysis-site/lab/</code>。</p>
+</header>
+
+<h2 id="principles">改造原则</h2>
+<ol class="steps">
+  <li><strong>先修地基，再加自主性</strong>：工具回合丢消息（A01）、护栏误伤（A02）、重试放大（A03）、摘要空转（A04）不修，任何 Agent 化都建立在会丢上下文、会误判、会放大成本的链路上。</li>
+  <li><strong>每一步都可评估</strong>：先有指标和金标集，再改 Prompt、换模型、加工具。没有 L5，所有改进都只能凭感觉。</li>
+  <li><strong>给决策权，也给边界</strong>：工具最小权限、每轮预算、循环硬上限、结构化的决策输出、人随时可以接管。</li>
+  <li><strong>时延敏感的路径少用工具</strong>：语音这类实时链路优先“代码预取 + 直接注入”，工具留给文字模式和异步任务。</li>
+  <li><strong>可回退</strong>：每项改造都挂在开关后面，新旧两条路径可以灰度对比。</li>
+</ol>
+
+<h2 id="p0">第 0 步：修地基（1–2 天）</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>改动</th><th>对应发现</th><th>做法</th><th>怎么验证</th></tr></thead>
+    <tbody>
+      <tr><td>工具回合的历史</td><td>A01、A10</td><td>删掉默认配方里手动注册的 ToolCallingAdvisor（或改为 history=true）；结构化与 RAG 调用一律改用不挂工具的配方</td><td>lab E1：第二轮必须包含 USER 与 ASSISTANT(tool_calls)</td></tr>
+      <tr><td>关键词护栏</td><td>A02</td><td>不再用关键词拒绝包含用户数据的请求；增加输出侧护栏；注入检测改成打标签和告警</td><td>E5 的场景：引用注入话术的回答能正常评分</td></tr>
+      <tr><td>重试预算</td><td>A03、A12</td><td>内层校验改为 1 次，外层保留 2 次，或只留一层；指标改为统计真实的模型请求</td><td>E4：最坏请求次数从 8 降到 4 以内</td></tr>
+      <tr><td>摘要模板</td><td>A04</td><td>占位符改为花括号，并补渲染测试</td><td>E3：渲染结果包含变量值</td></tr>
+      <tr><td>人设与边界</td><td>A05、A06</td><td>人设直接进系统提示词，数据边界只包用户输入；语音去掉工具；自定义方向注入 JD 与类目</td><td>对比开关前后的首 token 时延指标</td></tr>
+      <tr><td>评委</td><td>A07、A08</td><td>按 <code>questionIndex</code> 对齐逐题结果；评委人设和深度标准按方向配置</td><td>构造“漏评一题”的假响应，断言分数不错位</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>A01 的修改方向（示意）</span><button type="button" class="copy-btn" data-copy="up-a01">复制</button></div>
+  <pre id="up-a01">// 修改前：默认配方手动注册 ToolCallingAdvisor，并从配置读到 history=false
+advisors.add(buildToolCallAdvisor(config.isToolCallConversationHistoryEnabled()));
+
+// 修改后：结构化与 RAG 调用使用不挂工具的客户端，护栏换成输出侧检查
+ChatClient structured = ChatClient.builder(chatModel)
+    .defaultAdvisors(outputGuard)
+    .build();
+
+// 确实需要工具的客户端不手动注册 ToolCallingAdvisor：ChatClient 会自动注册一个，
+// 并在没有内侧记忆 Advisor 时保留完整的工具回合历史
+ChatClient withTools = ChatClient.builder(chatModel)
+    .defaultTools(tools)
+    .defaultAdvisors(outputGuard)
+    .build();</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>A04 的回归测试（JUnit 5 + AssertJ，与项目测试风格一致）</span><button type="button" class="copy-btn" data-copy="up-a04">复制</button></div>
+  <pre id="up-a04">@Test
+@DisplayName("上下文摘要模板渲染后必须包含前情摘要与新增轮次")
+void summaryTemplateShouldRenderVariables() throws IOException {
+  String template = new ClassPathResource("prompts/voice-interview-context-summary.st")
+      .getContentAsString(StandardCharsets.UTF_8);
+
+  String rendered = new PromptTemplate(template).render(Map.of(
+      "previousSummary", "候选人做过 RAG 项目",
+      "newTurns", "面试官：讲讲分块策略"));
+
+  assertThat(rendered).contains("候选人做过 RAG 项目").contains("讲讲分块策略");
+}</pre>
+</div>
+<p>这一步的面试价值往往比后面几步更高：它展示的是“发现问题、最小复现、定位根因、小改动修复、用测试守住”的完整闭环，而每一条都有实验证据。</p>
+
+<h2 id="interviewer-agent">第 1 步：追问决策 Agent</h2>
+<p><strong>动机</strong>：现在的追问是出题时一次性定好的：文字面试每道主问题的追问数由配置固定（默认 1 个，最多 2 个），题库面试从追问池里随机抽取，都与候选人实际怎么回答无关；语音面试虽然是自由对话，但没有结构化的决策和证据。目标是在每次回答之后，由模型决定“追问 / 下一题 / 收尾”，并把判断依据记录下来，供最终报告引用。</p>
+<figure class="diagram">
+  <div class="svg-wrap w800">
+    <svg viewBox="0 0 960 300" role="img" aria-label="面试官 Agent 架构：候选人回答和代码预取的参考要点进入面试官 Agent；Agent 可以调用查要点、查资料两个只读工具和一个幂等的记证据工具；决策经过工具预算、模型请求上限和输出侧护栏后，输出结构化的 NextAction，文字模式展示追问，语音模式交给 TTS；记录下的证据进入最终评估报告。">
+      <defs>
+        <marker id="ia-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head"/></marker>
+        <marker id="ia-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-head accent"/></marker>
+      </defs>
+      <rect class="dg-box plain" x="16" y="34" width="160" height="56" rx="8"/>
+      <text class="dg-t" x="96" y="58" text-anchor="middle">候选人回答</text>
+      <text class="dg-s" x="96" y="77" text-anchor="middle">文字或语音识别结果</text>
+      <rect class="dg-box plain" x="16" y="120" width="160" height="56" rx="8"/>
+      <text class="dg-t" x="96" y="144" text-anchor="middle">代码预取（语音）</text>
+      <text class="dg-s" x="96" y="163" text-anchor="middle">参考要点，与 ASR 并行</text>
+
+      <rect class="dg-box accent" x="226" y="34" width="290" height="76" rx="10"/>
+      <text class="dg-t" x="371" y="62" text-anchor="middle">面试官 Agent（每轮一次决策）</text>
+      <text class="dg-s" x="371" y="82" text-anchor="middle">人设在系统提示词；对话记录在用户消息</text>
+      <text class="dg-s" x="371" y="99" text-anchor="middle">并包数据边界</text>
+
+      <rect class="dg-box" x="226" y="140" width="92" height="50" rx="8"/>
+      <text class="dg-t" x="272" y="162" text-anchor="middle">查要点</text>
+      <text class="dg-s" x="272" y="180" text-anchor="middle">只读</text>
+      <rect class="dg-box" x="325" y="140" width="92" height="50" rx="8"/>
+      <text class="dg-t" x="371" y="162" text-anchor="middle">查资料</text>
+      <text class="dg-s" x="371" y="180" text-anchor="middle">只读</text>
+      <rect class="dg-box" x="424" y="140" width="92" height="50" rx="8"/>
+      <text class="dg-t" x="470" y="162" text-anchor="middle">记证据</text>
+      <text class="dg-s" x="470" y="180" text-anchor="middle">幂等写</text>
+      <line class="dg-line" x1="272" y1="112" x2="272" y2="138" marker-start="url(#ia-a)" marker-end="url(#ia-a)"/>
+      <line class="dg-line" x1="371" y1="112" x2="371" y2="138" marker-start="url(#ia-a)" marker-end="url(#ia-a)"/>
+      <line class="dg-line" x1="470" y1="112" x2="470" y2="138" marker-start="url(#ia-a)" marker-end="url(#ia-a)"/>
+
+      <rect class="dg-box warn" x="546" y="34" width="170" height="76" rx="8"/>
+      <text class="dg-t" x="631" y="56" text-anchor="middle">边界</text>
+      <text class="dg-s" x="631" y="75" text-anchor="middle">工具预算 3 次 / 轮</text>
+      <text class="dg-s" x="631" y="92" text-anchor="middle">模型请求上限 4 次 · 输出护栏</text>
+
+      <rect class="dg-box good" x="746" y="34" width="198" height="76" rx="8"/>
+      <text class="dg-t" x="845" y="56" text-anchor="middle">NextAction</text>
+      <text class="dg-s" x="845" y="75" text-anchor="middle">FOLLOW_UP · NEXT_QUESTION</text>
+      <text class="dg-s" x="845" y="92" text-anchor="middle">WRAP_UP + 一句话 + 理由</text>
+      <rect class="dg-box plain" x="746" y="140" width="198" height="50" rx="8"/>
+      <text class="dg-t" x="845" y="162" text-anchor="middle">呈现</text>
+      <text class="dg-s" x="845" y="180" text-anchor="middle">文字展示追问 / 语音 TTS</text>
+
+      <rect class="dg-box" x="226" y="226" width="490" height="56" rx="8"/>
+      <text class="dg-t" x="471" y="249" text-anchor="middle">证据沉淀</text>
+      <text class="dg-s" x="471" y="268" text-anchor="middle">记录的证据进入最终报告；总分仍由统一评估引擎计算</text>
+
+      <line class="dg-line" x1="176" y1="62" x2="224" y2="62" marker-end="url(#ia-a)"/>
+      <path class="dg-line" d="M176,148 L200,148 L200,96 L224,96" marker-end="url(#ia-a)"/>
+      <line class="dg-line accent" x1="516" y1="72" x2="544" y2="72" marker-end="url(#ia-c)"/>
+      <line class="dg-line accent" x1="716" y1="72" x2="744" y2="72" marker-end="url(#ia-c)"/>
+      <line class="dg-line" x1="845" y1="110" x2="845" y2="138" marker-end="url(#ia-a)"/>
+      <line class="dg-line" x1="470" y1="190" x2="470" y2="224" marker-end="url(#ia-a)"/>
+    </svg>
+  </div>
+  <figcaption>和现在的语音面试相比，变化在三处：决策是结构化的枚举而不是一段话；工具从“加载人设”换成了真正影响决策的“查要点、查资料、记证据”；循环有软硬两道边界。实验 E6、E7 验证了这套组合在 Spring AI 2.0 上的行为。</figcaption>
+</figure>
+<h3 id="ia-decisions">设计决策</h3>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>决策点</th><th>选择</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>输出</td><td>结构化 <code>NextAction</code>：枚举动作 + 一句要说的话 + 理由</td><td>可校验、可统计、可回放；一段自由文本无法判断 Agent 做了什么决定</td></tr>
+      <tr><td>工具</td><td>两个只读 + 一个幂等写</td><td>只读工具可以放心重试；写工具以题号为键覆盖，重放不会重复</td></tr>
+      <tr><td>终止</td><td>输出决策即结束；工具预算 3 次；模型请求硬上限 4 次</td><td>两道保险，软预算引导模型收尾，硬上限兜底（E6）</td></tr>
+      <tr><td>上下文</td><td>人设进系统提示词；对话记录进用户消息并包数据边界</td><td>可信与不可信分开，正好是 A06 的反面</td></tr>
+      <tr><td>实时性</td><td>文字模式直接使用；语音模式由代码预取参考要点、与 ASR 定稿并行，Agent 只做决策不做检索</td><td>每次工具调用多一次模型往返</td></tr>
+      <tr><td>评分</td><td>证据由 Agent 记录，总分仍由统一评估引擎计算</td><td>决策和评分解耦，一个出错不会拖垮另一个</td></tr>
+      <tr><td>规则兜底</td><td>同一道题最多追问 2 次，由代码判断</td><td>“追问多少次”是产品规则，不交给模型</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>工具集（节选自 lab/agent/InterviewerTools.java）</span><button type="button" class="copy-btn" data-copy="up-tools">复制</button></div>
+  <pre id="up-tools">@Tool(description = "查询某个考察类目的参考要点，用来判断候选人的回答遗漏了什么。只读，不要用它出新题。")
+public String lookupReference(
+    @ToolParam(description = "类目 key，例如 REDIS、RAG、MCP_PROTOCOL") String category) {
+  if (!spend()) {
+    return BUDGET_EXHAUSTED;                       // 机器可读的信号，引导模型直接给出决策
+  }
+  String points = references.keyPoints(category);
+  return points == null ? "NOT_FOUND: 没有该类目的参考要点" : truncate(points, 1500);
+}
+
+@Tool(description = "记录对当前题目的评估证据和 0-100 分，同一题重复记录时以最后一次为准。")
+public String recordObservation(
+    @ToolParam(description = "题目序号，从 0 开始") int questionIndex,
+    @ToolParam(description = "引用候选人原话的证据，50 字以内") String evidence,
+    @ToolParam(description = "0 到 100 的整数分") int score,
+    ToolContext toolContext) {                      // 会话 ID 走 ToolContext，不暴露给模型
+  if (!spend()) {
+    return BUDGET_EXHAUSTED;
+  }
+  if (score &lt; 0 || score &gt; 100) {
+    return "INVALID_ARGUMENT: score 必须在 0-100 之间";   // 参数错误也回给模型，让它自行修正
+  }
+  String sessionId = String.valueOf(toolContext.getContext().get("sessionId"));
+  observations.put(questionIndex, new Observation(sessionId, questionIndex, truncate(evidence, 80), score));
+  return "OK";
+}</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>决策入口（节选自 lab/agent/InterviewerAgent.java）</span><button type="button" class="copy-btn" data-copy="up-agent">复制</button></div>
+  <pre id="up-agent">public InterviewerAgent(ChatModel chatModel, int maxModelCallsPerTurn) {
+  this.chatClient = ChatClient.builder(chatModel)
+      // 不手动注册 ToolCallingAdvisor，交给框架自动注册（保留完整历史）
+      .defaultAdvisors(new LoopGuardAdvisor(maxModelCallsPerTurn, WRAP_UP_JSON))
+      .build();
+}
+
+public NextAction decide(String sessionId, String persona, String transcript, InterviewerTools tools) {
+  return chatClient.prompt()
+      .system(persona + DECISION_RULES)            // 可信内容：人设与决策规则
+      .user(transcript)                            // 不可信内容：对话记录（生产中包数据边界）
+      .tools(tools)
+      .toolContext(Map.of("sessionId", sessionId))
+      .advisors(LoopGuardAdvisor.newBudget())      // 每次调用一个新的循环计数器
+      .call()
+      .entity(NextAction.class);
+}</pre>
+</div>
+<h3 id="ia-risks">风险与评估</h3>
+<ul>
+  <li><strong>过度追问</strong>：代码规定同一题最多追问 2 次，超过就强制 NEXT_QUESTION。</li>
+  <li><strong>打分漂移</strong>：Agent 记录的分数只作为证据，最终分数仍走统一评估，两者差异过大时标记人工复核。</li>
+  <li><strong>时延与成本</strong>：文字模式每轮 2–3 次模型请求；用 token 统计 Advisor 按场景看成本，语音模式靠预取把工具调用移出关键路径。</li>
+  <li><strong>怎么证明它比固定追问好</strong>：录一批真实面试片段，人工标注“这里该追问什么”，看 Agent 的追问是否指向被遗漏的要点（命中率）；同时看平均工具调用数、循环保护触发率和每轮时延。</li>
+</ul>
+
+<h2 id="agentic-rag">第 2 步：Agentic RAG</h2>
+<p>现在的 RAG 是一条固定的提示链：改写 → 检索 → 生成，只检索一次，没有关键词召回、没有重排、没有引用，拒答靠关键词探测。升级分六处：</p>
+<ol class="steps">
+  <li><strong>检索决策</strong>：“谢谢”“好的”这类消息不检索，用代码规则加一个小模型分类，省一次改写和一次向量检索。</li>
+  <li><strong>查询分解</strong>：复合问题拆成子问题并行检索，比如“对比 HNSW 和 IVFFlat 的召回与内存”拆成两路。</li>
+  <li><strong>混合召回</strong>：pgvector 向量检索 + 关键词检索，用倒数排名融合（RRF）合并。PostgreSQL 自带的全文检索不会切分中文，需要 zhparser、pg_jieba 这类分词扩展，或者退一步用 pg_trgm 做近似匹配。</li>
+  <li><strong>重排</strong>：对融合后的前 20–30 段用重排模型精排，再取前 5–8 段进上下文。</li>
+  <li><strong>带引用的结构化回答</strong>：要求模型输出答案、引用的片段编号，以及一个“资料是否足够”的布尔字段，取代现在按关键词判断拒答的探测窗口。</li>
+  <li><strong>自检与纠正</strong>：每条引用都必须能在检索结果里找到；“资料不足”时换一种写法再检索一次，最多一次，仍然不足就如实说明。</li>
+</ol>
+<div class="prompt">
+  <div class="prompt-head"><span>倒数排名融合（节选自 lab/agent/RankFusion.java）</span><button type="button" class="copy-btn" data-copy="up-rrf">复制</button></div>
+  <pre id="up-rrf">public static List&lt;String&gt; fuse(int k, int topN, List&lt;String&gt;... rankings) {
+  Map&lt;String, Double&gt; scores = new HashMap&lt;&gt;();
+  for (List&lt;String&gt; ranking : rankings) {
+    for (int rank = 0; rank &lt; ranking.size(); rank++) {
+      // 只看名次不看分数，余弦相似度和全文检索得分不需要归一化
+      scores.merge(ranking.get(rank), 1.0 / (k + rank + 1), Double::sum);
+    }
+  }
+  return scores.entrySet().stream()
+      .sorted(Map.Entry.&lt;String, Double&gt;comparingByValue(Comparator.reverseOrder())
+          .thenComparing(Map.Entry.comparingByKey()))
+      .limit(topN)
+      .map(Map.Entry::getKey)
+      .toList();
+}</pre>
+</div>
+<p><strong>评测</strong>：准备一批“问题 + 标注的相关片段”，检索看 recall@k 和 MRR；生成看引用是否可验证、回答是否被引用片段支持；再统计拒答率。现在按长度调整阈值的经验参数，也应该放到这套评测上重新校准。</p>
+
+<h2 id="mcp">第 3 步：MCP</h2>
+<p>项目自带的参考把几个容易混淆的概念排成一条线：Function Calling 是模型能力，MCP 是连接工具与数据的协议标准，Skills 是更上层的能力封装。放到这个项目里：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>概念</th><th>是什么</th><th>解决什么</th><th>本项目</th></tr></thead>
+    <tbody>
+      <tr><td>Function Calling</td><td>模型输出结构化的调用意图</td><td>让模型“说出”要调用什么</td><td>Skill 工具走的就是它</td></tr>
+      <tr><td>MCP</td><td>基于 JSON-RPC 2.0 的协议，定义 Host、Client、Server 与工具、资源、提示词等能力</td><td>工具和数据只实现一次，任何支持 MCP 的宿主都能接入</td><td>没有</td></tr>
+      <tr><td>Skills</td><td>SKILL.md 形式的能力包，渐进式披露</td><td>把“怎么做一类事”的知识打包给 Agent</td><td>10 个面试方向</td></tr>
+    </tbody>
+  </table>
+</div>
+<h3 id="mcp-server">方向一：把题库暴露成 MCP Server</h3>
+<p>把“抽题”“核对答案要点”做成 MCP 工具，用户就可以在 Claude Desktop、IDE 里的 Agent 等任意 MCP 宿主中直接练习。Spring AI 的 MCP Server Starter（WebMVC 版本，传输协议可配置为 Streamable HTTP）会把容器里的 <code>ToolCallbackProvider</code> Bean 注册为 MCP 工具。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>节选自 lab/agent/QuestionBankMcpTools.java</span><button type="button" class="copy-btn" data-copy="up-mcp">复制</button></div>
+  <pre id="up-mcp">// 参数上的 @ToolParam 描述在节选中省略
+@Tool(description = "按方向和难度随机抽取已启用的面试题，只返回题目 id 和题干")
+public List&lt;Map&lt;String, Object&gt;&gt; drawQuestions(String category, String difficulty, int limit) {
+  int safeLimit = Math.max(1, Math.min(limit, 5));          // 服务端夹紧参数，不信任调用方
+  return bank.draw(category, difficulty, safeLimit).stream()
+      .map(q -&gt; Map.&lt;String, Object&gt;of("id", q.id(), "question", q.question()))
+      .toList();                                            // 不返回参考答案
+}
+
+@Bean
+public ToolCallbackProvider questionBankTools(QuestionBankMcpTools tools) {
+  return MethodToolCallbackProvider.builder().toolObjects(tools).build();
+}</pre>
+</div>
+<p>要守住的边界：只暴露 ACTIVE 状态的题目；抽题不返回参考答案，核对答案只返回命中和遗漏的要点；每个客户端单独鉴权和限流；调用写审计日志。传输方式上，stdio 适合本机进程（桌面工具拉起一个本地 Server），Streamable HTTP 适合远程、多客户端的部署，它取代了早期的 HTTP + SSE 传输。</p>
+<h3 id="mcp-client">方向二：作为 MCP Client 接入外部能力</h3>
+<p>比如接入 GitHub 的 MCP Server，读取候选人简历里写到的开源仓库 README 和目录结构，生成更贴近真实代码的深挖题。风险在于外部内容是不可信数据，可能携带间接注入：只给只读权限，结果截断后包数据边界，并且只在出题这类“输出会被结构化校验”的环节使用。</p>
+
+<h2 id="multi-agent">第 4 步：多评委与评审-优化</h2>
+<div class="split">
+  <div>
+    <h4>评委小组</h4>
+    <p class="small">同一批回答交给 2–3 个视角的评委（正确性、深度、表达），或同一个评委采样 3 次；由代码取中位数或加权；分歧超过阈值的题标记人工复核。成本和时延约为原来的 2–3 倍，适合放在异步评估里。</p>
+  </div>
+  <div>
+    <h4>题库的评审-优化循环</h4>
+    <p class="small">生成器出草稿 → 评审检查重复题、元信息题、能否由资料回答、参考答案与资料是否一致 → 生成器按意见修改，最多 2 轮；评审不通过的保持草稿状态，人只复核这部分。</p>
+  </div>
+</div>
+<p>什么时候不该用多 Agent：单个 Agent 加好的工具能解决的，就不要拆。多 Agent 的成本、时延和调试难度成倍增加；一致性靠“共享状态 + 编排者做最终裁决”，而不是让 Agent 之间自由对话。项目自带的参考里提到的“编排者-子 Agent”模式，在这里就是“代码编排 + 多个评委并行 + 代码汇总”，编排者甚至不需要是模型。</p>
+
+<h2 id="long-term-memory">第 5 步：长期记忆与个性化练习</h2>
+<p>前提是先有用户体系（项目目前没有）。在此基础上，每次评估后更新一张学习者画像表：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>字段</th><th>来源</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>类目、练习次数、平均分、最近一次得分</td><td>评估报告的类别分</td><td>出题时提高弱项类目的题量权重</td></tr>
+      <tr><td>最近遗漏的要点</td><td>知识库面试的 keyPoints 对照、Agent 记录的证据</td><td>作为出题提示，追问优先落在这些点上</td></tr>
+      <tr><td>下次复习时间</td><td>按间隔重复规则计算</td><td>练习计划 Agent 按到期时间安排题目</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>隐私上只存聚合统计和要点，不存回答原文，并提供删除入口。这样“记忆”不再只是去重，而是真正改变下一次面试的内容。</p>
+
+<h2 id="eval-harness">贯穿全程：评测与回归</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>对象</th><th>金标集</th><th>指标</th><th>什么时候跑</th></tr></thead>
+    <tbody>
+      <tr><td>出题</td><td>10 个方向 × 若干份典型简历</td><td>类目覆盖率、重复率、元信息题比例、题量是否准确</td><td>改出题 Prompt 或模型时</td></tr>
+      <tr><td>评估（评委）</td><td>每个方向 30–50 条人工打分</td><td>平均绝对误差、±10 分一致率、Spearman、多次运行的方差</td><td>改评估 Prompt、模型或批大小时</td></tr>
+      <tr><td>RAG</td><td>问题 + 标注的相关片段</td><td>recall@k、MRR、拒答率、引用可验证率</td><td>改分块、阈值或检索策略时</td></tr>
+      <tr><td>面试官 Agent</td><td>录制的面试片段 + 人工标注的“该追问什么”</td><td>决策一致率、追问命中率、平均工具调用、循环保护触发率</td><td>每次改动</td></tr>
+      <tr><td>框架行为</td><td>lab 里的实验</td><td>E1–E8 的断言</td><td>每次升级 Spring AI</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>CI 分两层：快层用假模型，确定、秒级，每个 PR 都跑，守住框架行为和代码逻辑；慢层用真实模型对金标集跑，每晚一次，输出指标和上一次的差异。Prompt 模板本来就在 Git 里，给每次调用打上模板版本（例如文件哈希）标签，指标就能按 Prompt 版本对比。</p>
+
+<h2 id="observability-upgrade">可观测怎么补</h2>
+<ul>
+  <li>在工具循环内侧挂 <code>TokenUsageAdvisor</code>，按 Provider 和场景统计输入、输出、缓存命中 token 和真实的模型请求次数（E7 验证了计数准确）。</li>
+  <li>给循环保护触发、输出护栏拦截、结构化降级各加一个计数器，这三个数就是 Agent 健康度的早期信号。</li>
+  <li>引入 micrometer-tracing 和 OpenTelemetry 导出，Spring AI 已经为 ChatClient、每个 Advisor、模型调用和工具执行生成了 Observation，接上就能看到完整的调用树。</li>
+  <li>语音补一个“首段音频到达浏览器”的端到端时延，由前端上报。</li>
+</ul>
+
+<h2 id="roadmap">路线图</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>步骤</th><th class="num">工作量</th><th>可演示的结果</th><th>面试价值</th></tr></thead>
+    <tbody>
+      <tr><td>0 修地基</td><td class="num">1–2 天</td><td>lab 断言全部通过；最坏请求次数从 8 降到 4；E5 不再误伤</td><td>最能体现“排查与验证”能力</td></tr>
+      <tr><td>1 评测体系</td><td class="num">2–3 天起</td><td>评委一致性报告、RAG 召回报告</td><td>L5 从 0 到 1，最稀缺</td></tr>
+      <tr><td>2 追问决策 Agent</td><td class="num">3–5 天</td><td>文字面试里的自适应追问和有证据的报告</td><td>直接回答“你做过什么 Agent”</td></tr>
+      <tr><td>3 MCP Server</td><td class="num">1–2 天</td><td>在 Claude Desktop 里直接抽题练习</td><td>协议与生态</td></tr>
+      <tr><td>4 Agentic RAG</td><td class="num">3–5 天</td><td>带引用的回答、混合检索</td><td>RAG 深挖题的底气</td></tr>
+      <tr><td>5 长期记忆</td><td class="num">3 天以上</td><td>弱项驱动出题（需要先有用户体系）</td><td>记忆设计</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>顺序上建议评测先于 Agent：先有尺子，再证明 Agent 比固定追问好。时间只够做两步的话，做 0 和 2，并用 1 的最小版本（二三十条样本）给出对比数据。</p>
+
+<h2 id="prompts">用 Claude Code 推进的提示词</h2>
+<div class="prompt">
+  <div class="prompt-head"><span>第 0 步：修地基</span><button type="button" class="copy-btn" data-copy="up-p0">复制</button></div>
+  <pre id="up-p0">背景：project-analysis-site/lab 里的实验 E1、E3、E4、E5 复现了四个问题：默认配方工具回合丢失用户消息、语音摘要模板变量不替换、结构化输出最坏请求 8 次、SafeGuard 误伤候选人回答。
+
+请按以下顺序处理，每一步先写失败的测试（RED），再做最小修改（GREEN），最后跑 ./gradlew :app:test --no-daemon：
+1. LlmProviderRegistry：结构化与 RAG 调用不再挂 Skill 工具；删除手动注册的 ToolCallingAdvisor，交给 ChatClient 自动注册。测试：用一个第一轮请求工具的假 ChatModel，断言第二轮消息包含 USER 与带 tool_calls 的 ASSISTANT。
+2. voice-interview-context-summary.st：占位符改为花括号。测试：渲染结果包含两个变量的值。
+3. StructuredOutputInvoker：重试总次数不超过 4 次模型请求，并新增统计真实模型请求次数的指标。测试：假模型始终返回非法 JSON，断言请求次数。
+4. SafeGuard：不再对包含用户数据的请求做关键词拒绝，改为输出侧检查；输入侧命中只记日志和计数。测试：回答中引用“忽略之前的指令”的评估能正常返回分数。
+不要修改无关代码，不要跳过或禁用任何测试；每一步单独提交，提交信息遵守 .githooks/commit-msg 的格式。</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>第 2 步：追问决策 Agent</span><button type="button" class="copy-btn" data-copy="up-p2">复制</button></div>
+  <pre id="up-p2">参考 project-analysis-site/lab/src/main/java/lab/agent 下的 InterviewerTools、InterviewerAgent、LoopGuardAdvisor，在文字面试里实现“追问决策”：
+- 新增 modules/interview/agent 包；工具只读查询参考要点（复用 InterviewSkillService 的参考题库与知识库题目的 keyPoints），幂等记录证据；
+- 决策输出 NextAction（FOLLOW_UP / NEXT_QUESTION / WRAP_UP、一句话、理由），用 StructuredOutputInvoker 同等的校验；
+- 每轮工具预算 3 次、模型请求上限 4 次；同一题最多追问 2 次由代码判断；
+- 功能挂在配置开关后面，默认关闭；证据写入新表，评估时作为参考上下文传给 UnifiedEvaluationService；
+- 先在计划模式下给出表结构、接口和测试清单，我确认后再实现。测试用假 ChatModel 覆盖：正常追问、预算耗尽、循环上限、非法分数参数。</pre>
+</div>
+<div class="callout pitch">
+  <span class="label">面试这样说</span>
+  <p>我给这个项目做 Agent 化的顺序是：先修地基，再建尺子，最后才给模型决策权。地基是工具回合丢消息、护栏误伤、重试放大、摘要模板空转这四个问题，每个都有最小实验复现；尺子是评委一致性和 RAG 召回两套金标集；然后才做追问决策 Agent，它输出结构化的动作，只有两个只读工具和一个幂等写工具，每轮有工具预算和模型请求上限，证据写进报告但总分仍由评估引擎计算。这样每一步都能用数据说明它比原来好。</p>
+</div>

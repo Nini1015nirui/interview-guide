@@ -1,0 +1,129 @@
+<header class="page-head">
+  <p class="eyebrow">Agent 专题 · 考前速记</p>
+  <h1>考前速记：把全站压缩成一页</h1>
+  <p class="lead">面试前 30 分钟看这一页。它把全站 17 页压缩成：一句话定位、必须记住的数字、必须会画的图、经过验证的结论、10 个高频问题的 20 秒答案、3 个故事骨架、不要说的话，以及每一页的一句话摘要。每一条都链接回原文，答不上来就点进去重读。</p>
+</header>
+
+<h2 id="one-liner">一句话定位</h2>
+<div class="split">
+  <div>
+    <h4>通用版</h4>
+    <p class="small">基于 Spring Boot 4 和 Spring AI 2.0 的 AI 面试训练平台：简历分析、文字与语音模拟面试、RAG 知识库问答、题库面试。核心价值是把慢、贵、不稳定的大模型调用做成可靠的产品：异步化、结构化输出重试、幂等、状态机、限流。</p>
+  </div>
+  <div>
+    <h4>Agent 岗版</h4>
+    <p class="small">一个以工作流为主、在语音面试里带一个工具调用循环的大模型应用。我用最小实验验证了它工具循环的问题（工具回合丢失用户消息），找到了项目放弃工具调用的真正原因，并设计了带预算和循环上限的追问决策 Agent。</p>
+  </div>
+</div>
+
+<h2 id="numbers">必须记住的数字</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th class="num">数字</th><th>含义</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td class="num">12 / 11 / 1</td><td>聊天模型调用点 / 其中工作流 / 其中工具循环（语音）</td><td><a href="agent-overview.html#inventory">调用点清单</a></td></tr>
+      <tr><td class="num">7</td><td>默认配方挂着 Skill 工具的工作流调用点</td><td><a href="agent-overview.html#accidental-autonomy">意外的自主性</a></td></tr>
+      <tr><td class="num">3 / 1</td><td>ChatClient 配方（默认、plain、voice）/ 工具数量（只读的 Skill）</td><td><a href="agent-mechanics.html#tc-recipes">三种配方</a></td></tr>
+      <tr><td class="num">895</td><td>Skill 工具定义的 token（cl100k 估算，约 2245 字符），每次请求都带</td><td><a href="agent-lab.html#e2">E2</a></td></tr>
+      <tr><td class="num">370–601</td><td>单个 SKILL.md 正文的字符数</td><td><a href="agent-mechanics.html#skills-cost">Skills 成本</a></td></tr>
+      <tr><td class="num">8 = 2 × (1+3)</td><td>一次结构化调用最坏的模型请求次数（外层 2 次 × 校验 Advisor 1+3 次）</td><td><a href="agent-lab.html#e4">E4</a></td></tr>
+      <tr><td class="num">+200 / +300</td><td>记忆 Advisor 与 ToolCallingAdvisor 的默认顺序（相对最高优先级）</td><td><a href="agent-mechanics.html#tc-framework">Advisor 链</a></td></tr>
+      <tr><td class="num">10 / 17</td><td>面试方向（Skill）/ Prompt 模板</td><td><a href="ai-foundation.html#skills">Skill 出题</a></td></tr>
+      <tr><td class="num">5</td><td>Redis Stream 异步管线；消费失败最多重试 3 次；pending 空闲 5 分钟回收</td><td><a href="reliability.html#stream-template">Stream 模板</a></td></tr>
+      <tr><td class="num">8 / 3000 / 6000 / 12000</td><td>评估每批题数 / 评估简历截断 / 参考基线 / 出题参考题库合计（字符）</td><td><a href="agent-mechanics.html#ctx-budget">预算表</a></td></tr>
+      <tr><td class="num">60 ≈ 600</td><td>历史去重最多 60 道题，只放摘要，约 600 token</td><td><a href="ai-foundation.html#skill-history">历史去重</a></td></tr>
+      <tr><td class="num">20 / 10</td><td>语音压缩：保留 20 轮原文，攒够 10 轮再增量摘要</td><td><a href="agent-mechanics.html#mem-compression">上下文压缩</a></td></tr>
+      <tr><td class="num">20 · 12 · 8</td><td>RAG 按问题长度的 topK；阈值 0.18（短查询）/ 0.28</td><td><a href="modules.html#rag-pipeline">RAG 链路</a></td></tr>
+      <tr><td class="num">1024</td><td>向量维度（pgvector、HNSW、余弦）</td><td><a href="architecture.html#data-model">数据模型</a></td></tr>
+      <tr><td class="num">120 / 800ms / 3</td><td>语音每轮回复上限字数 / 回声冷却 / TTS 并发</td><td><a href="voice.html#sequence">语音时序</a></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="diagrams">必须会画的图</h2>
+<ol class="steps">
+  <li><a href="index.html#big-picture">三种交互方式</a>：同步、异步（Stream）、流式（SSE / WebSocket）。</li>
+  <li><a href="agent-overview.html#definition">自主度光谱</a>：L0 单次调用到 L4 多 Agent，项目各环节的位置。</li>
+  <li><a href="agent-mechanics.html#tc-framework">Advisor 链与两个循环</a>：工具循环在外，校验循环在内。</li>
+  <li><a href="agent-mechanics.html#tc-recipes">工具回合的消息对比</a>：默认配方只剩 SYSTEM 和 TOOL。</li>
+  <li><a href="reliability.html#state-machine">题库生成状态机</a> 或 <a href="reliability.html#stream-template">Stream 消费者循环</a>。</li>
+  <li><a href="agent-upgrade.html#interviewer-agent">面试官 Agent 架构</a>：工具、边界、结构化决策、证据沉淀。</li>
+</ol>
+
+<h2 id="verified">经过验证的 8 条结论</h2>
+<ol class="steps">
+  <li><strong>工具回合丢消息</strong>：默认配方关了 ToolCallingAdvisor 的内部历史又没有记忆 Advisor，第二轮只发 SYSTEM → TOOL；这很可能就是 4 月“工具调用不兼容”的根因（E1，A01）。</li>
+  <li><strong>渐进式披露在这里是负收益</strong>：工具定义约 895 token，比任何一个技能正文都大，还要多一次往返（E2）。</li>
+  <li><strong>摘要模板空转</strong>：占位符写成尖括号，变量不替换，开启压缩反而丢记忆（E3，A04）。</li>
+  <li><strong>重试被放大</strong>：结构化调用最坏请求模型 8 次，指标只显示 2 次（E4，A03）。</li>
+  <li><strong>护栏误伤</strong>：SafeGuard 扫描整个 Prompt，引用注入话术的正确回答会让整批评估得 0 分（E5，A02）。</li>
+  <li><strong>循环没有上限</strong>：框架只看有没有 tool_calls，要自己加循环内侧的硬上限和工具预算（E6）。</li>
+  <li><strong>记忆开关一开就坏</strong>：2.0 的记忆 Advisor 断言必须有会话 ID，项目从不传（A09）。</li>
+  <li><strong>信任边界标反</strong>：可信人设被包进数据边界，与“边界内不执行指令”冲突（A06）。</li>
+</ol>
+
+<h2 id="answers">10 个高频问题的 20 秒答案</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>问题</th><th>20 秒答案</th><th>展开</th></tr></thead>
+    <tbody>
+      <tr><td>这是 Agent 吗？</td><td>以工作流为主，语音有一个工具循环。定性小一点，分析深一点。</td><td><a href="agent-qa.html#qa-positioning">AQ01</a></td></tr>
+      <tr><td>为什么大部分环节不用 Agent？</td><td>结果要打分复用、时延和成本有预算、失败要能逐步重试；没有写工具，注入的最坏影响有限。</td><td><a href="agent-overview.html#why-not-agent">总览</a></td></tr>
+      <tr><td>工具调用怎么工作？</td><td>客户端驱动的多轮：带工具请求 → 模型返回 tool_calls → 执行后回填 tool 消息 → 带完整上下文再请求。模型不执行任何东西。</td><td><a href="agent-mechanics.html#tc-protocol">协议层</a></td></tr>
+      <tr><td>怎么防止无限循环？</td><td>工具层软预算 + 循环内侧的硬上限 Advisor + 重复调用检测，lab 里 16 次降到 4 次。</td><td><a href="agent-lab.html#e6">E6</a></td></tr>
+      <tr><td>渐进式披露省 token 吗？</td><td>看规模。这里索引 895 token 比正文还大，直接注入更省更快；技能多、正文长、会话有状态时才划算。</td><td><a href="agent-mechanics.html#skills-cost">Skills</a></td></tr>
+      <tr><td>记忆怎么做？</td><td>文字面试会话双写、RAG 最近 10 条真实消息、语音文本拼接加窗口摘要；2.0 的记忆 Advisor 要传会话 ID、注意 order。</td><td><a href="agent-mechanics.html#memory">记忆</a></td></tr>
+      <tr><td>JSON 怎么保证稳定？</td><td>Schema 格式说明 + 校验循环 + 修复型重试 + 代码负责算术；要给重试设总预算。</td><td><a href="agent-mechanics.html#structured">结构化输出</a></td></tr>
+      <tr><td>Prompt 注入怎么防？</td><td>分层防御 + 输出只当数据 + 最小权限；关键词护栏会误伤，要移到输出侧。</td><td><a href="agent-mechanics.html#guardrails">护栏</a></td></tr>
+      <tr><td>评估可信吗？</td><td>有量表和基线，但评委人设错配、按位置对齐、没有金标集；用 MAE、±10 一致率、Spearman 做回归。</td><td><a href="agent-mechanics.html#judge">LLM 评委</a></td></tr>
+      <tr><td>如果让你继续做？</td><td>先修地基，再建尺子，最后给模型决策权：追问决策 Agent。</td><td><a href="agent-upgrade.html#roadmap">路线图</a></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="stories">3 个故事骨架</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>故事</th><th>情境 → 行动 → 结果</th><th>原文</th></tr></thead>
+    <tbody>
+      <tr><td>工具调用“不兼容”的真相</td><td>项目把放弃工具归因于厂商 → 读源码 + 假模型打印每轮消息 + 核对 M4 源码 + 对齐提交时间线 → 根因是历史开关，修复只需删掉手动注册</td><td><a href="agent-lab.html#root-cause">根因复盘</a></td></tr>
+      <tr><td>护栏把正确答案判成 0 分</td><td>AI Agent 方向会考注入 → 按项目词表复现，引用注入话术的回答整批 0 分、资料含短语 RAG 拒答 → 改为输出侧护栏 + 打标签，补对应测试</td><td><a href="agent-lab.html#e5">E5</a></td></tr>
+      <tr><td>旧任务覆盖新结果</td><td>题库可反复生成 → 先写失败测试，再用 taskId 围栏 + 行锁比较后更新 + 模型调用在事务外 → 旧 Worker 结果自动作废</td><td><a href="resume.html#star-state-machine">STAR 故事一</a></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 id="donts">不要说的话</h2>
+<ul>
+  <li>“我做了一个 AI 面试 Agent。”除非你真的实现了追问决策 Agent，否则会被 Agent Loop、终止条件、评测三连问住。</li>
+  <li>“工具调用在多厂商之间不兼容。”这是项目文档的结论，而你已经有证据说明更可能是配置问题。</li>
+  <li>“渐进式披露一定省 token。”这个项目里恰好相反。</li>
+  <li>“SafeGuard 能防住注入。”它会误伤，也能被绕过，真正的边界在权限。</li>
+  <li>任何没测过的数字（QPS、准确率、时延提升百分比）。</li>
+  <li>把原作者和社区贡献者的设计说成自己独立完成的。</li>
+</ul>
+
+<h2 id="site-summary">全站一页纸</h2>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>页面</th><th>一句话</th><th>面试里用来回答</th></tr></thead>
+    <tbody>
+      <tr><td><a href="index.html">总览</a></td><td>功能地图、三种交互方式、最值得讲的技术点</td><td>“介绍一下你的项目”</td></tr>
+      <tr><td><a href="architecture.html">架构</a></td><td>模块化单体；PostgreSQL + pgvector、Redis、S3；HTTP 200 + 业务码；16 张表</td><td>架构与选型</td></tr>
+      <tr><td><a href="ai-foundation.html">AI 底座</a></td><td>多 Provider 注册表、三种配方、结构化输出执行器、注入防御、Skill 出题、统一评估</td><td>AI 应用岗的核心追问</td></tr>
+      <tr><td><a href="reliability.html">可靠性</a></td><td>Stream 模板、先提交后投递、taskId 围栏状态机、幂等创建、Lua 多维限流</td><td>后端深挖</td></tr>
+      <tr><td><a href="modules.html">业务模块</a></td><td>简历、文字面试、RAG（改写、按长度调阈值、影子写入）、题库面试、日程、设置</td><td>每个模块的链路与问题</td></tr>
+      <tr><td><a href="voice.html">语音面试</a></td><td>级联 ASR → LLM → TTS、句子级并发合成、四层回声防护、“第三轮起无声”</td><td>实时系统</td></tr>
+      <tr><td><a href="frontend.html">前端</a></td><td>统一请求层、自研 SSE 客户端、幂等路由、轮询、AudioWorklet</td><td>全栈追问</td></tr>
+      <tr><td><a href="quality.html">质量与问题</a></td><td>测试与 TDD 证据、CI、18 条通用审查发现</td><td>“项目有什么不足”</td></tr>
+      <tr><td><a href="interview-qa.html">面试问答</a></td><td>50 道通用追问</td><td>自测</td></tr>
+      <tr><td><a href="resume.html">简历与讲述</a></td><td>简历条目、1/3/10 分钟讲法、STAR、被质疑时的应对</td><td>表达</td></tr>
+      <tr><td><a href="vibe-coding.html">Claude Code 复刻</a></td><td>AI 协作证据、上下文工程、分阶段复刻路线与提示词</td><td>“你用 AI 写代码吗”</td></tr>
+      <tr><td><a href="agent-overview.html">Agent 总览</a></td><td>12 个调用点清单、模式对照、Harness 六层审计、定性说法</td><td>“这是 Agent 吗”</td></tr>
+      <tr><td><a href="agent-mechanics.html">机制拆解</a></td><td>工具循环源码、Skills 成本、记忆、上下文、结构化、护栏、评委、实时语音、可观测</td><td>Agent 原理深挖</td></tr>
+      <tr><td><a href="agent-lab.html">源码实验</a></td><td>8 个可复现实验、12 条 Agent 专项发现、根因复盘</td><td>“你怎么验证的”</td></tr>
+      <tr><td><a href="agent-upgrade.html">改造方案</a></td><td>修地基 → 评测 → 追问决策 Agent → MCP → Agentic RAG → 长期记忆</td><td>“如果让你继续做”</td></tr>
+      <tr><td><a href="agent-qa.html">Agent 题库</a></td><td>60 道 Agent 岗追问与参考回答</td><td>自测</td></tr>
+    </tbody>
+  </table>
+</div>

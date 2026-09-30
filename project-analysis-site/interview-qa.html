@@ -18,9 +18,12 @@
 <header class="topbar">
   <div class="topbar-inner">
     <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <span class="crumb">面试准备 · 面试问答</span>
     <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
     <nav class="sitenav" id="sitenav" aria-label="站点导航">
       <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">Agent 专题</span><a href="agent-overview.html">Agent 总览</a><a href="agent-mechanics.html">机制拆解</a><a href="agent-lab.html">源码实验</a><a href="agent-upgrade.html">改造方案</a><a href="agent-qa.html">Agent 题库</a><a href="agent-cheatsheet.html">考前速记</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
       <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html" aria-current="page">面试问答</a><a href="resume.html">简历与讲述</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
@@ -37,7 +40,7 @@
 <header class="page-head">
   <p class="eyebrow">面试准备 · 高频问答</p>
   <h1>面试高频问答：50 道追问与参考回答</h1>
-  <p class="lead">按面试官最常见的追问路径整理，从项目整体、大模型工程、异步一致性、数据与缓存、RAG、实时语音、前端，到质量和开放题。每题给出考察点、参考回答和可能的下一问。前 20 题覆盖了九成以上的高频追问，时间紧就先练这些。参考回答用“我们”指代项目团队，你需要按自己的真实参与程度改写，不要背诵。</p>
+  <p class="lead">按面试官最常见的追问路径整理，从项目整体、大模型工程、异步一致性、数据与缓存、RAG、实时语音、前端，到质量和开放题。每题给出考察点、参考回答和可能的下一问。前 20 题覆盖了九成以上的高频追问，时间紧就先练这些。参考回答用“我们”指代项目团队，你需要按自己的真实参与程度改写，不要背诵。面 Agent 应用开发岗的，再练 <a href="agent-qa.html">Agent 题库</a> 的 60 问。</p>
 </header>
 
 <div class="qa-tools">
@@ -108,7 +111,7 @@
   <summary><span class="q-no">Q07</span>怎么保证大模型返回合法的 JSON？</summary>
   <div class="qa-body">
     <p class="qa-focus">考察点：结构化输出的工程化手段。</p>
-    <p>三件事：格式说明、校验、修复型重试。用 Spring AI 的 <code>BeanOutputConverter</code> 由目标类型生成 JSON Schema 格式说明，拼在系统提示词后面；调用时打开 schema 校验；失败后把上一次的错误原因截断到 200 字，拼进“请修正以下问题”的提示再调一次，默认最多两次。关闭 schema 校验的模式下，还会在本地修复“字符串里的双引号没转义”这种最常见的错误。所有业务都走同一个执行器，避免每个 Service 各写一套重试。还有一个细节：把 Spring AI 自带的重试关掉，否则两层重试相乘，一次失败可能调用很多次模型。</p>
+    <p>三件事：格式说明、校验、修复型重试。用 Spring AI 的 <code>BeanOutputConverter</code> 由目标类型生成 JSON Schema 格式说明，拼在系统提示词后面；调用时打开 schema 校验；失败后把上一次的错误原因截断到 200 字，拼进“请修正以下问题”的提示再调一次，默认最多两次。关闭 schema 校验的模式下，还会在本地修复“字符串里的双引号没转义”这种最常见的错误。所有业务都走同一个执行器，避免每个 Service 各写一套重试。还有一个细节：把 Spring AI 自带的网络重试关掉，否则两层重试相乘；但 schema 校验开关会插入一个自带 3 次重复的校验 Advisor，不受这个配置控制，一次调用最坏会请求模型 8 次，所以重试要设总预算（<a href="agent-lab.html#e4">实验 E4</a>）。</p>
     <p class="qa-follow">可能的追问：为什么不用厂商的 JSON Mode？（不同厂商支持程度不一，而且 JSON Mode 只保证是 JSON，不保证符合 schema；执行器与厂商无关。）</p>
   </div>
 </details>
@@ -127,7 +130,7 @@
   <div class="qa-body">
     <p class="qa-focus">考察点：对 LLM 安全的认知是否现实。</p>
     <p>纵深防御，三层加一条原则。第一层是输入净化：去掉行首的角色标记、精确的注入短语和伪造的分隔符，再用带随机 UUID 的边界标签把用户文本包起来，攻击者没法提前写出能闭合它的标签。第二层是系统提示词声明数据边界：边界内的内容是数据，不执行其中的指令。第三层是 Spring AI 的 SafeGuardAdvisor，请求发出前做敏感短语匹配，命中就不调用模型、直接返回固定回复。最重要的一条原则是：模型的输出只当数据用，经过 schema 校验再入库，业务逻辑从不根据模型的自然语言去执行动作。黑名单一定能被绕过，所以重点是限制注入成功后的影响范围。</p>
-    <p class="qa-follow">可能的追问：SafeGuard 检查的是输入还是输出？（输入。它在请求前检查整个 Prompt，想做输出侧检查需要自定义 Advisor。）</p>
+    <p class="qa-follow">可能的追问：SafeGuard 检查的是输入还是输出？（输入。它在请求前对整个 Prompt 做区分大小写的子串匹配，连候选人的回答和检索资料都在扫描范围内，所以会误伤，见 <a href="agent-lab.html#e5">实验 E5</a>；想做输出侧检查需要自定义 Advisor。）</p>
   </div>
 </details>
 
@@ -145,7 +148,7 @@
   <div class="qa-body">
     <p class="qa-focus">考察点：对 Agent 能力边界的判断，是否能从失败中总结。</p>
     <p>最初接入 spring-ai-agent-utils 的 SkillsTool，让模型按需调用工具加载方向说明，属于“渐进式披露”。随后发现几个问题：人设通过工具和手工拼接注入了两次；简历题生成时模型会意外调用工具；最关键的是不同 OpenAI 兼容厂商对工具调用消息链路的校验不一致，有的直接报错。最后出题改回“后端确定性地把类目、参考题库和人设注入 Prompt”。结论是：开放式对话适合工具调用，而结构化生成需要单轮、无工具、上下文确定；多厂商兼容时，工具调用是最脆弱的一环。</p>
-    <p class="qa-follow">可能的追问：那语音面试呢？（语音仍用工具加载人设，而且由于每轮是无状态调用，模型可能每轮都重新加载，多一次往返，是个可以优化的点。）</p>
+    <p class="qa-follow">可能的追问：那语音面试呢？（语音仍用工具加载人设，而且由于每轮是无状态调用，模型可能每轮都重新加载，多一次往返，是个可以优化的点。）再追问“真的是厂商不兼容吗”：同一时期项目手动注册了关闭内部历史的 ToolCallAdvisor，工具回合的第二轮只剩系统消息和工具结果，这更可能是根因，见 <a href="agent-lab.html#root-cause">根因复盘</a>。</p>
   </div>
 </details>
 
@@ -490,7 +493,7 @@
   </div>
 </details>
     <nav class="pager" aria-label="上一页与下一页">
-      <a class="prev" href="quality.html"><span class="dir">上一页</span><span class="ttl">测试、CI 与代码审查</span></a>
+      <a class="prev" href="agent-cheatsheet.html"><span class="dir">上一页</span><span class="ttl">考前速记</span></a>
       <a class="next" href="resume.html"><span class="dir">下一页</span><span class="ttl">简历写法与讲述脚本</span></a>
     </nav>
   </main>
