@@ -131,6 +131,65 @@
 </figure>
 <h3 id="producer">生产者</h3>
 <p><code>AbstractStreamProducer.sendTask</code> 做三件事：构造消息（字段全是字符串，重试次数从 0 开始）、以近似裁剪的方式写入（相当于 <code>XADD key MAXLEN ~ 1000</code>，防止 Stream 无限增长）、失败时回调子类的 <code>onSendFailed</code>。子类在回调里把实体状态改成 FAILED，简历分析和面试评估的回调用的是 <code>REQUIRES_NEW</code> 独立事务，保证即使调用方的事务回滚，失败状态也能落下来。</p>
+<p>先把几个 Redis Stream 的术语落到这个项目上：<strong>Stream</strong> 是一个只追加的消息日志，每条消息有一个形如 <code>1760000000000-0</code>（毫秒时间戳-序号）的 ID；<strong>消费者组</strong>（这里是 <code>analyze-group</code>）让多个消费者分摊同一个 Stream，每条消息只投给组里的一个消费者；消息投出去但还没被 <code>XACK</code> 确认时，会记在组的 <strong>pending 列表</strong>（PEL）里，记录“投给了谁、空闲了多久”；<code>XAUTOCLAIM</code> 的作用是把 pending 列表里空闲超过指定时间的消息“转到我名下”，这就是崩溃恢复的手段。以简历分析为例，一条任务在 Redis 里的一生是这样的：</p>
+<div class="callout example">
+  <span class="label">走一遍：一条简历分析任务在 Redis 里经历的命令（Redisson 调用对应的原生命令）</span>
+  <pre>① 上传接口（生产者 AnalyzeStreamProducer.sendTask）
+   XADD resume:analyze:stream MAXLEN ~ 1000 *
+        resumeId 42  content "张三 | 后端开发 | 三年经验……（整篇简历正文）"  retryCount 0
+   → 1760000000000-0
+
+② 消费线程 analyze-consumer 的每一轮循环（RedisService.streamConsumeMessages）
+   XAUTOCLAIM resume:analyze:stream analyze-group analyze-consumer-1a2b3c4d 300000 0-0 COUNT 10
+   → 没有空闲超过 5 分钟的 pending 消息
+   XREADGROUP GROUP analyze-group analyze-consumer-1a2b3c4d COUNT 10 BLOCK 1000
+              STREAMS resume:analyze:stream &gt;
+   → 1760000000000-0 {resumeId: 42, content: ……, retryCount: 0}
+     （此刻这条消息进入 pending 列表，属于 analyze-consumer-1a2b3c4d）
+
+③ 处理成功：UPDATE resumes SET analyze_status='COMPLETED' …，然后
+   XACK resume:analyze:stream analyze-group 1760000000000-0     → 从 pending 列表移除
+
+③' 处理抛异常且 retryCount=0 &lt; 3：先追加一条新消息，再确认旧消息
+   XADD resume:analyze:stream MAXLEN ~ 1000 * resumeId 42 content "……" retryCount 1
+   XACK resume:analyze:stream analyze-group 1760000000000-0
+   新消息在下一轮 XREADGROUP（1 秒内）就会被读到，中间没有任何退避等待
+
+③'' 处理到一半进程被 kill：既没有 XADD 也没有 XACK
+   消息留在 pending 列表，owner 仍是已经不存在的 analyze-consumer-1a2b3c4d
+   进程重启后消费者名变成 analyze-consumer-9f8e7d6c（UUID 前 8 位，每次启动都不同）
+   它每轮的 XAUTOCLAIM 都会检查，直到这条消息空闲满 300000 毫秒（5 分钟）才被转到自己名下重新处理
+   在此之前数据库里 analyze_status 一直显示 PROCESSING</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>源码节选 · common/async/AbstractStreamConsumer.processMessage（省略日志）</span></div>
+  <pre>T payload;
+try {
+    payload = parsePayload(messageId, data);
+} catch (Exception e) {
+    ackMessage(messageId);                 // 毒消息：解析失败直接确认丢弃，不让它反复失败
+    return;
+}
+if (payload == null) { ackMessage(messageId); return; }
+
+int retryCount = parseRetryCount(data);    // 读消息里的 retryCount 字段，缺失按 0
+try {
+    if (shouldSkip(payload)) { ackMessage(messageId); return; }        // 已删除 / 已完成
+    if (!tryMarkProcessing(payload)) { ackMessage(messageId); return; } // 领取失败（题库生成用）
+    processBusiness(payload);
+    markCompleted(payload);
+    ackMessage(messageId);
+} catch (Exception e) {
+    if (retryCount &lt; AsyncTaskStreamConstants.MAX_RETRY_COUNT) {       // MAX_RETRY_COUNT = 3
+        retryMessage(payload, retryCount + 1);                         // 子类负责重新 XADD
+    } else {
+        markFailed(payload, truncateError(
+            taskDisplayName() + " failed after retry " + retryCount + ": " + e.getMessage()));
+    }
+    ackMessage(messageId);                 // 不管重试还是失败，旧消息都确认掉
+}</pre>
+</div>
+<p>从这段代码能算出两个具体数字。第一，“最多重试 3 次”意味着一共执行 4 次：retryCount 为 0、1、2 时失败都会再入队，为 3 时失败才标记 FAILED，错误信息形如“面试评估 failed after retry 3: 批次评估失败：……”（截断到 500 字符）。第二，4 次执行是背靠背的：重新入队的消息在下一轮循环（1 秒以内）就被读到，没有指数退避。如果失败原因是模型服务限流或短暂不可用，4 次机会可能在几秒内全部用完。</p>
 <h3 id="consumer">消费者</h3>
 <ul>
   <li><strong>线程模型</strong>：每个消费者在 <code>@PostConstruct</code> 时创建一个显式配置的 <code>ThreadPoolExecutor</code>（核心与最大都是 1，守护线程，拒绝策略 Abort），里面跑一个 <code>while (running)</code> 循环；<code>@PreDestroy</code> 时置标志位并关闭线程池。项目规则禁止用 <code>Executors.newFixedThreadPool</code> 这类工厂方法，所以线程池都是手写参数。</li>
@@ -161,7 +220,48 @@
 <p>异步任务最隐蔽的一类 bug 是“消息比数据先到”：如果在数据库事务提交前就把消息发出去，消费者可能读到旧状态，甚至读不到这一行；如果先发消息、后面事务回滚，就产生了“幽灵任务”。项目里有三种写法保证顺序：</p>
 <ul>
   <li><strong>事务同步回调</strong>：语音面试结束会话时，<code>sendEvaluateTaskAfterCommit</code> 判断当前是否在事务中，是就注册一个 <code>afterCommit</code> 回调，事务提交后才投递。</li>
-  <li><strong>小事务执行器</strong>：简历“重新分析”先用 <code>TransactionalExecutor.run</code> 把状态改回 PENDING 并提交，再在事务外投递。这个执行器还解决了同类方法内部调用导致 <code>@Transactional</code> 失效的问题。</li>
+  <li><strong>小事务执行器</strong>：简历“重新分析”先用 <code>TransactionalExecutor.run</code> 把状态改回 PENDING 并提交，再在事务外投递。这个执行器还解决了同类方法内部调用导致 <code>@Transactional</code> 失效的问题。</li></ul>
+<div class="split">
+  <div>
+    <div class="prompt">
+      <div class="prompt-head"><span>VoiceInterviewService.sendEvaluateTaskAfterCommit</span></div>
+      <pre>Runnable sendTask = () -&gt;
+    voiceEvaluateStreamProducer.sendEvaluateTask(sessionId.toString());
+if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+    sendTask.run();           // 不在事务里：直接发
+    return;
+}
+TransactionSynchronizationManager.registerSynchronization(
+    new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+            sendTask.run();   // 提交成功后才发；回滚则永远不发
+        }
+    });</pre>
+    </div>
+  </div>
+  <div>
+    <div class="prompt">
+      <div class="prompt-head"><span>TransactionalExecutor + ResumeUploadService.reanalyze</span></div>
+      <pre>@Service
+public class TransactionalExecutor {
+    @Transactional(rollbackFor = Exception.class)
+    public void run(Runnable action) { action.run(); }
+
+    @Transactional(rollbackFor = Exception.class,
+                   propagation = Propagation.REQUIRES_NEW)
+    public void runRequiresNew(Runnable action) { action.run(); }
+}
+
+// reanalyze：两步分开，第一步提交后才有第二步
+transactionalExecutor.run(
+    () -&gt; updateResumeForReanalysis(resumeId, taskContent, ...));
+analyzeStreamProducer.sendAnalyzeTask(resumeId, taskContent);</pre>
+    </div>
+  </div>
+</div>
+<p>为什么一个“只是转手调用一下”的类能让事务生效：Spring 的 <code>@Transactional</code> 靠代理实现，只有从外部经过代理调用才会开启事务；同一个类里 <code>this.foo()</code> 直接调用绕过了代理，注解等于不存在。把要进事务的代码作为 lambda 交给另一个 Bean 的 <code>run</code> 方法执行，就重新“经过了代理”。</p>
+<ul>
   <li><strong>状态服务单独成事务</strong>：题库生成先调用 <code>QuestionGenerationStateService.createTask</code>（自带事务）落好 QUEUED 和新 taskId，返回后才发消息；发送失败就把任务标记为 FAILED。</li>
 </ul>
 <p>剩下的缝隙是“提交成功、但投递失败且没来得及改状态”（比如进程恰好在两步之间崩溃），状态会停在 PENDING 或 QUEUED。题库生成和语音评估靠调度器兜底，其他管线靠用户手动重试。完整的解决方案是事务性发件箱（Outbox）：把消息和业务数据写进同一个事务的发件表，再由独立线程扫描投递。面试被问到时可以把这条改进路线讲出来。</p>
@@ -210,6 +310,81 @@
   </div>
   <figcaption>每一条箭头都是一次“锁住知识库行 → 核对 taskId 和当前状态 → 符合才更新”的小事务。旧 Worker 手里的 taskId 已经不是当前值，它发起的任何迁移都会比较失败，结果被丢弃。</figcaption>
 </figure>
+<p>“围栏令牌”（fencing token）这个词听起来抽象，落到代码里就是一个字符串比较。所有状态迁移方法都长一个样：先 <code>SELECT … FOR UPDATE</code> 锁住知识库这一行，再调用同一个 <code>matches</code> 判断，不满足就返回 <code>false</code>、什么都不改：</p>
+<div class="prompt">
+  <div class="prompt-head"><span>源码节选 · knowledgebase/service/QuestionGenerationStateService.java</span></div>
+  <pre>@Lock(LockModeType.PESSIMISTIC_WRITE)                        // KnowledgeBaseRepository
+@Query("SELECT k FROM KnowledgeBaseEntity k WHERE k.id = :id")
+Optional&lt;KnowledgeBaseEntity&gt; findByIdForUpdate(@Param("id") Long id);
+
+private boolean matches(KnowledgeBaseEntity kb, String taskId, QuestionGenStatus expectedStatus) {
+    return kb != null
+        &amp;&amp; taskId.equals(kb.getQuestionGenTaskId())             // 令牌对得上
+        &amp;&amp; kb.getQuestionGenStatus() == expectedStatus;         // 状态也对得上
+}
+
+@Transactional(rollbackFor = Exception.class)
+public boolean tryMarkProcessing(Long knowledgeBaseId, String taskId) {        // QUEUED → PROCESSING
+    KnowledgeBaseEntity kb = lockKnowledgeBaseOrNull(knowledgeBaseId);
+    if (!matches(kb, taskId, QuestionGenStatus.QUEUED)) return false;
+    kb.setQuestionGenStatus(QuestionGenStatus.PROCESSING);
+    kb.setQuestionGenUpdatedAt(LocalDateTime.now());
+    return true;
+}
+
+@Transactional(rollbackFor = Exception.class)
+public boolean replaceQuestionsAndComplete(Long knowledgeBaseId, String taskId,
+                                           List&lt;KnowledgeBaseQuestionEntity&gt; questions, int skippedCount) {
+    KnowledgeBaseEntity kb = lockKnowledgeBaseOrNull(knowledgeBaseId);
+    if (!matches(kb, taskId, QuestionGenStatus.PROCESSING)) return false;       // 过期的结果在这里被丢弃
+    questionRepository.deleteByKnowledgeBaseId(knowledgeBaseId);                // 删掉该知识库的全部旧题
+    questionRepository.saveAll(questions);
+    kb.setQuestionGenStatus(QuestionGenStatus.COMPLETED);
+    kb.setQuestionGenMessage(String.format("已生成 %d 道题，跳过 %d 道重复题", ...));
+    return true;
+}</pre>
+</div>
+<p>完整的迁移表（每一行都是一个 <code>@Transactional</code> 方法，都在行锁内执行 <code>matches</code>）：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>方法</th><th>谁调用</th><th>前置条件</th><th>迁移</th></tr></thead>
+    <tbody>
+      <tr><td><code>createTask</code></td><td>提交接口</td><td>已向量化，且当前不是 QUEUED / PROCESSING</td><td>任意 → QUEUED，生成新 taskId，写参数快照</td></tr>
+      <tr><td><code>tryMarkProcessing</code></td><td>消费者领取</td><td>taskId 相同且 QUEUED</td><td>QUEUED → PROCESSING</td></tr>
+      <tr><td><code>replaceQuestionsAndComplete</code></td><td>生成完成</td><td>taskId 相同且 PROCESSING</td><td>PROCESSING → COMPLETED，同时换题</td></tr>
+      <tr><td><code>resetForRetry</code></td><td>消费者失败且还能重试</td><td>taskId 相同且 PROCESSING</td><td>PROCESSING → QUEUED，再发一条消息</td></tr>
+      <tr><td><code>markFailed</code></td><td>重试耗尽</td><td>taskId 相同且不是 COMPLETED</td><td>→ FAILED，错误信息固定为“题目生成失败，请稍后重试”</td></tr>
+      <tr><td><code>touchQueuedForRecovery</code></td><td>调度器，每 60 秒</td><td>taskId 相同、QUEUED、更新时间早于 2 分钟前</td><td>只刷新更新时间，然后重发消息</td></tr>
+      <tr><td><code>resetStaleProcessing</code></td><td>调度器，每 60 秒</td><td>taskId 相同、PROCESSING、更新时间早于 20 分钟前</td><td>PROCESSING → QUEUED，然后重发消息</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>调度器的两个方法都要“再比一次时间”，是因为多实例部署时每个实例都有一个调度器：两个实例可能同时查到同一个卡住的任务，先拿到行锁的那个把更新时间刷成“现在”，后一个进锁后发现已经不“陈旧”了，直接返回 <code>false</code>，不会重复投递。</p>
+<div class="callout example">
+  <span class="label">走一遍：围栏在什么时候起作用</span>
+  <pre>10:00  用户提交 → createTask：taskId=A，QUEUED；消息 {kbId:7, taskId:A, retryCount:0}
+       （两台实例，每台一个消费线程：Worker1 在实例 1，Worker2 在实例 2）
+10:00  Worker1 领取：tryMarkProcessing(7, A) QUEUED→PROCESSING ✓，开始调用模型
+       （模型服务很慢，这次调用一直没返回）
+10:21  调度器：PROCESSING 已超过 20 分钟 → resetStaleProcessing(7, A) → QUEUED，重发消息
+10:21  Worker2 领取：tryMarkProcessing(7, A) ✓ → PROCESSING，同样调用模型，随后连续失败
+10:22  重试耗尽（retryCount 到 3）→ markFailed(7, A) → FAILED
+10:23  用户再次提交 → createTask：taskId=B，QUEUED；Worker2 领取 B → PROCESSING
+10:25  Worker1 终于拿到模型结果 → replaceQuestionsAndComplete(7, A, …)
+       行锁内：当前 taskId 是 B，不等于 A → 返回 false，旧结果被丢弃，题库不被覆盖 ✓
+10:26  Worker2 完成 B → replaceQuestionsAndComplete(7, B, …) ✓ → COMPLETED
+
+反过来，如果 10:21 之后 Worker1 先于 Worker2 完成：
+       当前 taskId 仍是 A、状态 PROCESSING（被 Worker2 领取后）→ Worker1 的结果被接受
+       Worker2 随后完成时状态已是 COMPLETED → 返回 false，它的结果被丢弃
+       结果是正确的（同一个任务只落一次），但“哪一次调用的结果被采用”取决于谁先完成
+
+只有一台实例时：
+10:21  调度器把状态改回 QUEUED 并重发消息，但唯一的消费线程还卡在 Worker1 里，新消息只能排队
+10:25  Worker1 完成 → replaceQuestionsAndComplete(7, A)：状态是 QUEUED 不是 PROCESSING → 结果被丢弃
+10:25  消费线程读到重发的消息 → tryMarkProcessing(7, A) ✓ → 从头再生成一遍</pre>
+</div>
+<p>也就是说，围栏区分的是“不同的提交”；同一个 taskId 在超时重投后可能有两个 Worker 同时在跑，这时靠“状态必须是 PROCESSING”保证只有一个结果生效，模型调用的费用则付了两次。单实例时，一次超过 20 分钟的生成即使最后成功了也会被作废重来。20 分钟并不是遥不可及：模型客户端读超时是 300 秒，一次结构化调用最坏要请求 8 次。</p>
 <h3 id="sm-mechanics">几个关键机制</h3>
 <ul>
   <li><strong>围栏令牌</strong>：每次提交生成一个 UUID 作为 taskId，存到知识库行上，消息里也带着它。所有迁移方法都要求“传入的 taskId 等于当前 taskId，且状态等于预期状态”，否则返回 false 什么都不做。</li>
@@ -275,7 +450,58 @@
   </div>
   <figcaption>三层保护各有分工：锁让并发的重复请求排队，Redis 映射让后续请求快速返回，数据库唯一索引是 Redis 丢数据时的最终真相。创建成功后前端用 replace 跳到 /interview/session/{id}，此后刷新走“恢复会话”而不是“创建”。</figcaption>
 </figure>
-<p>几个细节：请求 ID 由前端在进入 <code>/interview</code> 时用 <code>crypto.randomUUID()</code> 生成并写进 URL，面试配置放在 history state 里，刷新后都还在；后端要求请求 ID 匹配 <code>[A-Za-z0-9_-]{8,64}</code>，否则拒绝；锁的等待时间 185 秒略长于一次出题的最长耗时，第二个请求会等第一个完成后直接读到结果；代码注释里写着“幂等请求必须先成功落库，再写入易失缓存”，数据库是真相，Redis 只是加速层。</p>
+<div class="prompt">
+  <div class="prompt-head"><span>源码节选 · interview/service/InterviewSessionService.java</span></div>
+  <pre>private static final String CREATE_LOCK_PREFIX = "interview:create:";
+private static final String CREATE_RESULT_PREFIX = "interview:create:result:";
+private static final Duration CREATE_RESULT_TTL = Duration.ofDays(1);
+
+public InterviewSessionDTO createSession(CreateInterviewRequest request) {
+    String requestId = normalizeRequestId(request.requestId());   // 必须匹配 [A-Za-z0-9_-]{8,64}
+    if (requestId == null) {
+        return createSessionInternal(request);                     // 没带请求 ID：不做幂等
+    }
+    return redisService.executeWithLock(
+        CREATE_LOCK_PREFIX + requestId, 185, 600, TimeUnit.SECONDS, // 等锁 185s，租约 600s
+        () -&gt; createIdempotentSession(request, requestId));
+}
+
+private InterviewSessionDTO createIdempotentSession(CreateInterviewRequest request, String requestId) {
+    String cachedSessionId = redisService.get(CREATE_RESULT_PREFIX + requestId);   // 第 1 层：Redis 映射
+    if (cachedSessionId != null) return getSession(cachedSessionId);
+
+    Optional&lt;InterviewSessionEntity&gt; existing = persistenceService.findByRequestId(requestId);  // 第 2 层：数据库
+    if (existing.isPresent()) {
+        redisService.set(CREATE_RESULT_PREFIX + requestId, existing.get().getSessionId(), CREATE_RESULT_TTL);
+        return getSession(existing.get().getSessionId());
+    }
+
+    InterviewSessionDTO created = createSessionInternal(request, requestId);  // 出题 + 落库（request_id 唯一约束）
+    redisService.set(CREATE_RESULT_PREFIX + requestId, created.sessionId(), CREATE_RESULT_TTL);
+    return created;
+}</pre>
+</div>
+<div class="callout example">
+  <span class="label">走一遍：用户在出题时刷新了页面</span>
+  <pre>t=0s   浏览器进入 /interview → 生成 requestId = 9b2f7c1e-5d4a-4e8b-a3c2-7f1d0e6b8a90
+       replace 到 /interview/create/9b2f7c1e-…，发起请求 A
+       A: tryLock("interview:create:9b2f7c1e-…")  → 拿到锁
+       A: GET interview:create:result:9b2f7c1e-… → nil
+       A: SELECT … FROM interview_sessions WHERE request_id = '9b2f7c1e-…' → 无
+       A: 查历史题 → 两路并行出题（开始调用模型）
+t=8s   用户刷新：URL 不变 → 请求 B 带着同一个 requestId
+       B: tryLock 同一把锁 → 阻塞等待（最多 185 秒）
+       请求 A 的浏览器连接已经断了，但服务端线程不受影响，继续出题
+t=35s  A: INSERT interview_sessions(session_id='c0ffee12ab34cd56', request_id='9b2f7c1e-…', …)
+       A: SET interview:session:c0ffee12ab34cd56 {题目、进度…} EX 86400
+       A: SET interview:create:result:9b2f7c1e-… c0ffee12ab34cd56 EX 86400
+       A: unlock（A 的响应发往已关闭的页面，被浏览器丢弃）
+t=35s  B: 拿到锁 → GET interview:create:result:9b2f7c1e-… → c0ffee12ab34cd56
+       B: getSession 返回同一场面试 → 前端 replace 到 /interview/session/c0ffee12ab34cd56
+       整个过程只调用了一轮模型，只有一行 interview_sessions</pre>
+</div>
+<p>几个细节：请求 ID 由前端在进入 <code>/interview</code> 时用 <code>crypto.randomUUID()</code> 生成并写进 URL，面试配置放在 history state 里，刷新后都还在；后端要求请求 ID 匹配 <code>[A-Za-z0-9_-]{8,64}</code>，否则拒绝（这个正则也保证了请求 ID 里不会出现冒号，锁键 <code>interview:create:{id}</code> 和结果键 <code>interview:create:result:{id}</code> 不会撞在一起）；代码注释里写着“幂等请求必须先成功落库，再写入易失缓存”，数据库是真相，Redis 只是加速层。</p>
+<p>关于 185 秒：提交说明里没有解释这个数，最说得通的来源是前端创建面试的 Axios 超时 180 秒再加 5 秒余量，也就是“第二个请求最多等到前端放弃为止”。它并不能覆盖出题的最坏耗时：模型客户端读超时 300 秒，结构化输出最坏请求 8 次。如果第一个请求超过 185 秒还没出完题，第二个请求会以“获取锁失败: interview:create:…”报错；超过 600 秒的租约后锁会自动释放（显式指定租约时 Redisson 的看门狗不会续期），此时第三个请求就可能再出一套题，最后靠 <code>request_id</code> 唯一约束兜底：插入冲突的那一方会去查已存在的会话并返回它。</p>
 <h3 id="idem-others">其他幂等点</h3>
 <ul>
   <li><strong>上传去重</strong>：简历和知识库都按文件内容的 SHA-256（不是文件名）去重，唯一索引兜底，命中直接返回已有记录。</li>
@@ -290,6 +516,24 @@
 <ul>
   <li><strong>读</strong>：先查 Redis；未命中就从数据库恢复，题目来自 <code>questions_json</code>，已作答的内容从答案表回填到对应题目，恢复后写回 Redis。</li>
   <li><strong>写</strong>：提交答案时先写数据库（答案、当前题号、状态，失败直接报错给用户），再更新 Redis；Redis 更新失败不影响正确性，下一次读会从数据库恢复。</li>
+</ul>
+<div class="callout example">
+  <span class="label">走一遍：Redis 重启后用户回到答题页</span>
+  <pre>缓存里原本存的是 CachedSession：
+  {sessionId:"c0ffee12ab34cd56", resumeId:42, resumeText:"……", knowledgeBaseId:null,
+   questionsJson:"[{questionIndex:0,…},…16 个…]", currentIndex:5, status:IN_PROGRESS}
+
+① GET interview:session:c0ffee12ab34cd56 → nil（Redis 重启，数据没了）
+② restoreSessionFromDatabase：
+   SELECT * FROM interview_sessions WHERE session_id='c0ffee12ab34cd56'
+     → questions_json（16 道题，出题时的原样）、current_question_index=5、status=IN_PROGRESS
+   SELECT * FROM interview_answers WHERE session_id=… ORDER BY question_index
+     → 5 行：question_index 0–4 的回答
+   把 5 条回答用 withAnswer 填回题目列表的第 0–4 项
+③ SET interview:session:c0ffee12ab34cd56 &lt;恢复后的 CachedSession&gt; EX 86400
+④ 前端拿到 currentIndex=5，直接定位到第 6 题，前 5 题的答案都在</pre>
+</div>
+<ul>
   <li><strong>语音会话</strong>：实体缓存在 <code>voice:interview:session:{id}</code>，1 小时过期；结束、暂停、评估状态变化时直接删除缓存（<span class="sha">dab8b57</span> 修复过“评估状态已更新但缓存还是旧的”问题）。</li>
 </ul>
 <p>值得讨论的一点：语音会话缓存的是 JPA 实体本身，实体结构一改，缓存里的旧对象就可能反序列化失败；把缓存对象和持久化实体分开是更稳妥的做法。</p>
@@ -315,6 +559,55 @@
 <h3 id="rl-algorithm">Lua 脚本怎么算</h3>
 <p>每条规则对应两个 Redis 键：<code>…:value</code> 存当前剩余令牌数，<code>…:permits</code> 是一个有序集合，记录每次发放（分数是时间戳，成员是“请求 ID:规则序号:数量”）。判断时，可用令牌 = 当前值（不存在则为上限）+ 已经滑出时间窗口的发放记录之和，封顶为上限。这是“滑动窗口 + 过期令牌回补”的组合，精度比固定窗口高，代价是每次放行都要在有序集合里记一条。</p>
 <p>键名形如 <code>ratelimit:{Class:method}:ip:1.2.3.4</code>。花括号是 Redis Cluster 的 hash tag，保证同一个方法的所有维度落在同一个槽位上，这是能在一个 Lua 脚本里同时操作多个键的前提。</p>
+<p>切面每次请求做的事：生成一个 UUID 当请求 ID，按注解顺序把每条规则翻译成“1 个令牌、窗口毫秒数、上限”三个参数，一次 <code>EVALSHA</code> 调用。以简历“重新分析”接口为例，它上面的两条注解和对应的调用是：</p>
+<div class="prompt">
+  <div class="prompt-head"><span>从注解到 Lua 调用 · ResumeController.reanalyze</span></div>
+  <pre>@PostMapping("/api/resumes/{id}/reanalyze")
+@RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 2)   // interval 默认 1，单位默认秒
+@RateLimit(dimension = RateLimit.Dimension.IP, count = 2)
+public Result&lt;Void&gt; reanalyze(@PathVariable Long id) { ... }
+
+EVALSHA &lt;sha&gt; 2
+  ratelimit:{ResumeController:reanalyze}:global          ← KEYS[1]
+  ratelimit:{ResumeController:reanalyze}:ip:1.2.3.4      ← KEYS[2]
+  1760000000000                                          ← ARGV[1] 当前时间（应用服务器的时钟）
+  5e0c…-uuid                                             ← ARGV[2] 请求 ID
+  2                                                      ← ARGV[3] 规则数
+  1 1000 2                                               ← 规则 1：申请 1 个，窗口 1000ms，上限 2
+  1 1000 2                                               ← 规则 2</pre>
+</div>
+<div class="prompt">
+  <div class="prompt-head"><span>源码节选 · resources/scripts/rate_limit_single.lua 第一阶段（只读）</span></div>
+  <pre>for i = 1, rule_count do
+    local current_val = tonumber(redis.call("get", value_key)) or max_tokens   -- 没有键就当满额
+    -- 找出已经滑出窗口的发放记录（分数 &lt;= now - interval）
+    local expired_values = redis.call("zrangebyscore", permits_key, 0, now_ms - interval)
+    for _, v in ipairs(expired_values) do
+        -- 成员格式是 "请求ID:规则序号:数量"，取最后一段数字
+        expired_count = expired_count + tonumber(string.match(v, ":(%d+)$"))
+    end
+    current_val = math.min(max_tokens, current_val + expired_count)            -- 过期的令牌“还回来”
+    if current_val &lt; permits then
+        return -i                                                               -- 第 i 条规则拒绝，一个键都没写
+    end
+end
+-- 第二阶段：逐条 zremrangebyscore 删过期记录、zadd 本次发放、set value = current - permits，
+-- 两个键都设过期时间 ceil(interval * 2 / 1000) 秒</pre>
+</div>
+<p>下面这组数据是把仓库里的脚本原样加载进一个真实的 Redis 7、按上面的参数调用得到的（请求 ID 简写成 r1–r4）：</p>
+<div class="table-wrap wide">
+  <table>
+    <thead><tr><th>时间</th><th>请求</th><th class="num">返回</th><th>global 的 value / permits</th><th>本请求 IP 的 value / permits</th></tr></thead>
+    <tbody>
+      <tr><td>t</td><td>r1，IP 1.2.3.4</td><td class="num">1</td><td>1 / {r1:1:1@t}</td><td>1 / {r1:2:1@t}</td></tr>
+      <tr><td>t+100ms</td><td>r2，IP 1.2.3.4</td><td class="num">1</td><td>0 / {r1@t, r2@t+100}</td><td>0 / {r1@t, r2@t+100}</td></tr>
+      <tr><td>t+200ms</td><td>r3，IP 5.6.7.8</td><td class="num">-1</td><td>0 / 不变</td><td>键根本没有被创建</td></tr>
+      <tr><td>t+1050ms</td><td>r4，IP 1.2.3.4</td><td class="num">1</td><td>0 / {r2@t+100, r4@t+1050}</td><td>0 / {r2@t+100, r4@t+1050}</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>读这张表：r3 来自另一个 IP，它自己的 IP 维度还是满额，但全局维度已经用完，脚本在第一条规则就返回 <code>-1</code>，切面据此知道是“全局”这条拒绝的；因为第一阶段只读，5.6.7.8 这个 IP 的两个键一个都没有建出来。r4 到达时，r1 的发放记录（t）已经滑出 1 秒窗口，被当作过期令牌“还回来” 1 个，于是放行，并在第二阶段把 r1 的记录删掉、写入 r4。这就是“滑动窗口 + 过期令牌回补”的全部含义。</p>
+<p>还有一个容易忽略的点：时间戳 <code>ARGV[1]</code> 取的是应用服务器的 <code>System.currentTimeMillis()</code>，不是 Redis 的 <code>TIME</code>。多实例部署时如果机器时钟有偏差，窗口边界会跟着偏。</p>
 <h3 id="rl-atomic">多维原子性：一次真实修复</h3>
 <p>一次请求要同时满足“全局”和“IP”两条规则。如果逐条“检查并扣减”，第一条扣了、第二条拒绝，第一条的配额就白白损失了。项目的脚本分两个阶段，<span class="sha">ca2e812</span>（合并自贡献者的 PR #39）又修正了其中一个细节：</p>
 <div class="split">
