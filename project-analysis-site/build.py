@@ -38,6 +38,18 @@ PAGES = [
      "统一请求层、自研 SSE 客户端、幂等路由、轮询约定、音频采集与播放、测试与构建。", "解析"),
     ("quality", "质量与问题", "测试、CI 与代码审查",
      "测试策略、TDD 证据、CI 与提交规范，以及 18 条按严重程度排序的代码审查发现。", "解析"),
+    ("agent-overview", "Agent 总览", "Agent 视角总览",
+     "用 Agent 的尺子量这个项目：12 个模型调用点清单、工作流与 Agent 模式对照、Harness 六层审计与定性说法。", "Agent"),
+    ("agent-mechanics", "机制拆解", "Agent 核心机制拆解",
+     "工具调用协议与 Spring AI 2.0 工具循环源码、Skills 渐进式披露的成本、记忆、上下文工程、结构化输出、护栏、LLM 评委。", "Agent"),
+    ("agent-lab", "源码实验", "源码实验与专项发现",
+     "8 个在 Spring AI 2.0.0 上可复现的最小实验、12 条 Agent 专项发现，以及工具调用“不兼容”的根因复盘。", "Agent"),
+    ("agent-upgrade", "改造方案", "Agent 化改造方案",
+     "先修地基，再做评测、追问决策 Agent、Agentic RAG、MCP、多评委与长期记忆，附可编译的代码草图。", "Agent"),
+    ("agent-qa", "Agent 题库", "Agent 面试题库",
+     "60 道结合本项目源码与实验的 Agent 应用开发面试追问与参考回答，支持自测模式。", "Agent"),
+    ("agent-cheatsheet", "考前速记", "考前速记",
+     "把全站压缩成一页：关键数字、必须会画的图、经过验证的结论、20 秒答案与故事骨架。", "Agent"),
     ("interview-qa", "面试问答", "面试高频问答",
      "50 道按主题分组的面试追问与参考回答，支持自测模式。", "面试"),
     ("resume", "简历与讲述", "简历写法与讲述脚本",
@@ -46,7 +58,7 @@ PAGES = [
      "仓库里的 AI 协作证据、上下文工程、标准开发回合、分阶段复刻路线与提示词、真实踩坑。", "AI"),
 ]
 
-GROUPS = [("解析", "项目解析"), ("面试", "面试准备"), ("AI", "AI 编码")]
+GROUPS = [("解析", "项目解析"), ("Agent", "Agent 专题"), ("面试", "面试准备"), ("AI", "AI 编码")]
 
 FONT_HREF = ("https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap")
 
@@ -89,11 +101,19 @@ def pager_html(idx):
             + "\n      ".join(items) + "\n    </nav>")
 
 
+def crumb_html(slug, idx):
+    if slug == "index":
+        return ""
+    _s, label, _t, _d, group = PAGES[idx]
+    glabel = dict(GROUPS)[group]
+    return f'\n    <span class="crumb">{html.escape(glabel)} · {html.escape(label)}</span>'
+
+
 def body_html(slug, idx, content):
     return f"""<a class="skip" href="#main">跳到正文</a>
 <header class="topbar">
   <div class="topbar-inner">
-    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">{SITE_NAME}</span></a>
+    <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">{SITE_NAME}</span></a>{crumb_html(slug, idx)}
     <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
     <nav class="sitenav" id="sitenav" aria-label="站点导航">
 {nav_html(slug)}
@@ -280,6 +300,13 @@ def main():
     qa = re.findall(r'<span class="q-no">Q(\d{2})</span>', fragments["interview-qa"])
     if len(qa) != 50 or qa != [f"{i:02d}" for i in range(1, 51)]:
         all_errors.append(f"[interview-qa] question numbering broken: {len(qa)} items")
+    # the Agent track promises 12 findings and 60 questions
+    agent_findings = re.findall(r"<td>A(\d{2}) <span class=\"tag", fragments["agent-lab"])
+    if agent_findings != [f"{i:02d}" for i in range(1, 13)]:
+        all_errors.append(f"[agent-lab] expected findings A01-A12, found {agent_findings}")
+    agent_qa = re.findall(r'<span class="q-no">AQ(\d{2})</span>', fragments["agent-qa"])
+    if agent_qa != [f"{i:02d}" for i in range(1, 61)]:
+        all_errors.append(f"[agent-qa] question numbering broken: {len(agent_qa)} items")
 
     for slug in fragments:
         text = fragments[slug]

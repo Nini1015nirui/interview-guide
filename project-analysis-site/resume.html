@@ -18,9 +18,12 @@
 <header class="topbar">
   <div class="topbar-inner">
     <a class="brand" href="index.html"><span class="brand-mark">IG</span><span class="brand-name">InterviewGuide 项目拆解</span></a>
+    <span class="crumb">面试准备 · 简历与讲述</span>
     <button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="sitenav" aria-expanded="false">页面</button>
     <nav class="sitenav" id="sitenav" aria-label="站点导航">
       <div class="nav-group"><span class="nav-group-label">项目解析</span><a href="index.html">总览</a><a href="architecture.html">架构</a><a href="ai-foundation.html">AI 底座</a><a href="reliability.html">可靠性</a><a href="modules.html">业务模块</a><a href="voice.html">语音面试</a><a href="frontend.html">前端</a><a href="quality.html">质量与问题</a></div>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <div class="nav-group"><span class="nav-group-label">Agent 专题</span><a href="agent-overview.html">Agent 总览</a><a href="agent-mechanics.html">机制拆解</a><a href="agent-lab.html">源码实验</a><a href="agent-upgrade.html">改造方案</a><a href="agent-qa.html">Agent 题库</a><a href="agent-cheatsheet.html">考前速记</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
       <div class="nav-group"><span class="nav-group-label">面试准备</span><a href="interview-qa.html">面试问答</a><a href="resume.html" aria-current="page">简历与讲述</a></div>
       <span class="nav-sep" aria-hidden="true"></span>
@@ -37,7 +40,7 @@
 <header class="page-head">
   <p class="eyebrow">面试准备 · 简历与讲述</p>
   <h1>简历写法与讲述脚本：把项目讲成你的项目</h1>
-  <p class="lead">这一页解决三个问题：简历上怎么写、面试时怎么讲（1 分钟、3 分钟、10 分钟三个版本和 4 个 STAR 故事）、被质疑时怎么接。所有内容都建立在一个前提上：讲你真正理解和做过的部分。</p>
+  <p class="lead">这一页解决三个问题：简历上怎么写、面试时怎么讲（1 分钟、3 分钟、10 分钟三个版本和 5 个 STAR 故事）、被质疑时怎么接。所有内容都建立在一个前提上：讲你真正理解和做过的部分。</p>
 </header>
 
 <h2 id="honesty">先说原则：诚实与差异化</h2>
@@ -87,6 +90,17 @@
 - RAG 问答支持多轮查询改写、按问题长度自适应 topK 与相似度阈值、无命中不调用模型、流式输出前 120 字拒答探测；向量化采用影子写入 + 事务内提升，失败不污染线上检索。
 - 实时语音面试：AudioWorklet 采集 16k PCM，LLM 流式输出按句切分并发合成（并发上限 3）、按序号有序下发，四层回声防护；定位并修复识别重连回调误删新连接、TTS 握手阻塞等问题。</pre>
 </div>
+<h3 id="bullets-agent">Agent 应用开发方向</h3>
+<div class="prompt">
+  <div class="prompt-head"><span>项目经历示例（Agent 岗）</span><button type="button" class="copy-btn" data-copy="resume-agent">复制</button></div>
+  <pre id="resume-agent">AI 面试训练平台 · Agent 化分析与改进（基于开源项目 InterviewGuide）｜Spring AI 2.0 · Tool Calling · Agent Skills · pgvector · Qwen3 实时语音
+- 梳理平台 12 个大模型调用点，按提示链、路由、分段并行、评估者-优化者等模式归类，定位出唯一的工具调用循环（语音面试），以及“默认配方给 7 个工作流步骤挂载工具”的结构性隐患。
+- 基于 Spring AI 2.0 源码和自建的假模型实验工程，复现工具回合的消息序列，定位项目“多厂商工具调用不兼容”问题的根因为 ToolCallingAdvisor 历史开关配置（第二轮仅发送 SYSTEM 与 TOOL 消息），给出配置级修复与回归用例。
+- 量化 Agent Skills 渐进式披露的成本（工具定义约 895 token，大于任一技能正文），据此把实时语音链路改为人设直接注入、参考资料由代码预取。（按实际完成情况填写）
+- 复现并修复结构化输出重试放大（最坏 8 次模型请求）和关键词护栏误伤（引用注入话术的回答整批 0 分），改为带总预算的单层修复型重试与输出侧护栏。（按实际完成情况填写）
+- 设计追问决策 Agent：两个只读工具加一个幂等写工具、结构化决策输出、工具预算与循环内侧硬上限，证据沉淀进评估报告；用金标集衡量评委与人工评分的一致性（MAE、Spearman）。（按实际完成情况填写）</pre>
+</div>
+<p class="small muted">前两条只要你亲手读过源码、跑过 <a href="agent-lab.html#run">实验工程</a> 就可以写；标了“按实际完成情况填写”的三条，必须在自己的 fork 上真正实现、并能展示提交和测试之后再写。</p>
 <h3 id="bullets-fullstack">全栈方向</h3>
 <div class="prompt">
   <div class="prompt-head"><span>项目经历示例（全栈）</span><button type="button" class="copy-btn" data-copy="resume-fullstack">复制</button></div>
@@ -123,7 +137,7 @@
 </ul>
 <p>10 分钟版本里一定要留出“不足与改进”的一段，主动讲两三条审查发现和你的处理，这会把谈话引向你最有准备的领域。</p>
 
-<h2 id="star">四个 STAR 故事</h2>
+<h2 id="star">五个 STAR 故事</h2>
 <h3 id="star-state-machine">故事一：旧任务覆盖新结果</h3>
 <dl class="facts">
   <dt>情境</dt>
@@ -170,6 +184,18 @@
   <dd>（按实际填写）提交记录、测试名称、PR 链接。面试时可以顺带讲：为什么选择在服务层删除而不是数据库级联（可见性、审计、与向量和文件的清理顺序一致）。</dd>
 </dl>
 
+<h3 id="star-toolloop">故事五：工具调用真的“不兼容”吗（Agent 岗）</h3>
+<dl class="facts">
+  <dt>情境</dt>
+  <dd>项目在 4 月让出题通过 Skill 工具加载人设，10 天后退回“后端直接注入”，提交说明把原因归结为“不同厂商对工具调用消息链路的校验不一致”；而默认配方今天仍然给 7 个调用点挂着这个工具。</dd>
+  <dt>任务</dt>
+  <dd>判断这个结论是否成立：工具调用是真的不可用，还是项目自己的问题。</dd>
+  <dt>行动</dt>
+  <dd>读 Spring AI 2.0 的 ToolCallingAdvisor 源码，注意到关闭内部历史后下一轮只发“系统消息 + 最后一条消息”；写一个第一轮请求工具的假模型，按项目配置复刻 Advisor 组合，打印每一轮发给模型的消息；再下载当时使用的 2.0.0-M4 源码核对同一段逻辑，并把相关提交按时间排好。</dd>
+  <dt>结果</dt>
+  <dd>第二轮请求只剩 SYSTEM 和 TOOL，用户消息和 tool_calls 都被丢掉，严格校验的接口会直接拒绝，这比“厂商不兼容”更能解释当时的现象。修复只需删掉手动注册的 Advisor、把默认配方的工具去掉；实验保留下来，作为以后升级框架时的回归用例。详细证据见 <a href="agent-lab.html#root-cause">根因复盘</a>。</dd>
+</dl>
+
 <h2 id="skeptic">被质疑时怎么接</h2>
 <details class="qa" open>
   <summary>“这不是 GitHub 上那个开源项目吗？”</summary>
@@ -206,6 +232,7 @@
 <ul>
   <li><strong>修问题</strong>：从 <a href="quality.html#fix-plan">修复顺序建议</a> 里挑 3–5 条，每条一个 PR，带复现测试和验证说明。</li>
   <li><strong>补评测</strong>：为出题、评估或 RAG 建一个小评测集，改一次 Prompt 或阈值就跑一次，把结果做成表格。这在 AI 应用岗面试里非常加分。</li>
+  <li><strong>跑实验</strong>：在 <code>project-analysis-site/lab</code> 里复现 A01–A05，再把实验改写成项目里的测试并修掉，这是 Agent 岗最有说服力的差异化，路线见 <a href="agent-upgrade.html#p0">改造方案 · 修地基</a>。</li>
   <li><strong>补指标</strong>：给语音链路加“首句音频到达浏览器”的时延，给模型调用加 token 和费用统计，截图放进你的博客。</li>
   <li><strong>部署上线</strong>：修好 WebSocket 地址和 Nginx 配置，加上登录，部署到云服务器，面试时可以现场演示。</li>
   <li><strong>写出来</strong>：把一两个故事写成技术博客，本站的结构可以直接借用。</li>
