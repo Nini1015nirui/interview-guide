@@ -407,7 +407,7 @@
   <summary><span class="q-no">AQ39</span>项目的重试会被放大吗？</summary>
   <div class="qa-body">
     <p class="qa-focus">考察点：对“隐藏循环”的敏感度。</p>
-    <p>会。项目把 spring.ai.retry.max-attempts 设为 1，想避免两层重试相乘，但 validateSchema() 插入的校验 Advisor 自带最多 3 次重复，和外层的 2 次相乘。我在 lab 里让模型一直返回非法 JSON，一次调用请求了 8 次模型；而项目的尝试次数指标只统计外层，显示的是 2。修复是只保留一层带错误反馈的重试并设总预算，指标改为统计真实请求。还要注意，工具循环的每一轮也会穿过这个校验 Advisor。</p>
+    <p>会。项目把 spring.ai.retry.max-attempts 设为 1，想避免两层重试相乘，但 validateSchema() 插入的校验 Advisor 自带最多 3 次重复，和外层的 2 次相乘。我在 lab 里让模型一直返回非法 JSON，一次调用请求了 8 次模型；而项目的尝试次数指标只统计外层，显示的是 2。修复是只保留一层带错误反馈的重试并设总预算，指标改为统计真实请求。还要注意，工具循环的每一轮也会穿过这个校验 Advisor；而且 Spring AI 2.0 底层的 OpenAI Java SDK 对 429、5xx 和超时还会自行重试 2 次，<code>max-attempts: 1</code> 同样管不到。</p>
     <p class="qa-follow">可能的追问：校验次数能配吗？（validateSchema() 用默认值；要调整就不用这个开关，自己按次数把 StructuredOutputValidationAdvisor 加到链上。）</p>
   </div>
 </details>

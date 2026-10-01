@@ -35,6 +35,33 @@
     </tbody>
   </table>
 </div>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · frontend/src/api/request.ts 的成功拦截器</span></div>
+  <pre>instance.interceptors.response.use(
+  (response) =&gt; {
+    if (response.config.skipResultTransform) return response;   // 下载等特殊请求：原样返回
+    const result = response.data as Result;
+    if (isResult(result)) {                                      // 有 number 型 code 和 string 型 message
+      if (result.code === SUCCESS_CODE) {                        // 200
+        response.data = result.data;                             // 页面拿到的就是 data
+        return response;
+      }
+      return Promise.reject(new Error(result.message || '请求失败'));
+    }
+    return response;                                             // 不是 Result：原样返回
+  },
+  async (error) =&gt; { ... }                                       // HTTP 非 2xx / 网络错误，见上表
+);</pre>
+</div>
+<div class="callout example">
+  <span class="label">走一遍：查看一份已被删除的简历</span>
+  <pre>后端：GlobalExceptionHandler 捕获 BusinessException(RESUME_NOT_FOUND, "简历不存在")
+      HTTP/1.1 200 OK
+      {"code":2001,"message":"简历不存在","data":null}
+拦截器：HTTP 200 → 成功回调 → isResult 为真 → code ≠ 200 → reject(new Error("简历不存在"))
+页面：try { await historyApi.getResumeDetail(id) } catch (e) { toast(e.message) }  → 弹出“简历不存在”
+浏览器开发者工具的 Network 面板里，这个请求显示为绿色的 200</pre>
+</div>
 <ul>
   <li><strong>文件下载</strong>：下载请求用 <code>responseType: 'blob'</code> 并跳过 Result 转换。难点在于：后端出错时返回的是 JSON 形式的 Result，但因为请求声明了 blob，它也会被包成一个 Blob。封装会检查 Blob 的类型和大小（JSON、文本或不超过 64KB 才尝试解析），能解析出 Result 就按错误处理，否则才当文件保存。</li>
   <li><strong>超时分级</strong>：普通请求 60 秒；上传 300 秒，和 Nginx 的读超时对齐；创建面试、提交答案、非流式知识库问答这类可能等待模型的请求单独放宽到 180 秒。</li>
@@ -50,6 +77,23 @@
   <li><strong>流中的业务错误</strong>：某一条 data 如果是 JSON 且带有 error / failed 标记，同样按错误抛出。</li>
   <li><strong>渲染节流</strong>：每来一个分片不直接 setState，而是把内容累加到变量里，用 <code>requestAnimationFrame</code> 合并到下一帧，并包在 <code>startTransition</code> 里降低优先级。一帧最多重渲染一次 Markdown，输入框不会卡。</li>
 </ul>
+<p>问答助手用的是“事件模式”。下面是一次回答在网络上的原始字节和解析过程（后端 <code>RagChatController</code> 用 <code>ServerSentEvent</code> 包装每个分片，前端 <code>ragChat.ts</code> 传了 <code>parseMode: 'event'</code>、<code>dataJoiner: ''</code>、<code>unescapeEscapedNewlines: true</code>）：</p>
+<div class="callout example">
+  <span class="label">走一遍：一段带换行的回答怎么穿过 SSE</span>
+  <pre>模型输出的两个分片：   "## RDB\n"   "- 定时快照"
+后端转义换行后发出：
+  data:## RDB\n⏎⏎                 ← 字面量反斜杠 + n；⏎⏎ 是 SSE 的事件分隔（空行）
+  data:- 定时快照⏎⏎
+前端 reader.read() 可能在任意字节处切开，比如第一次只读到 "data:## RD"
+  → flushEventBuffer 找不到 "\n\n"，先留在 buffer 里
+  → 下一次读到剩余部分，凑出完整事件块再处理
+processEventBlock："## RDB\\n" → 把字面量 \n 还原成换行 → onMessage("## RDB\n")
+页面：把分片累加进一个变量，requestAnimationFrame 合并到下一帧再渲染 Markdown</pre>
+</div>
+<div class="callout risk">
+  <span class="label">换行转义是单向的</span>
+  <p>后端只把真实的换行符替换成 <code>\n</code> 两个字符，没有先转义反斜杠本身；前端则把所有的 <code>\n</code> 两个字符都还原成换行。如果回答里本来就有字面量的 <code>\n</code>，比如 Java 示例代码 <code>System.out.println("a\nb");</code>，流式显示时这个 <code>\n</code> 会变成真正的换行，代码被拆成两行。数据库里存的是后端拼好的原文，刷新页面后从历史记录加载看到的又是正确的，所以同一条回答“边生成边看”和“刷新后看”不一样。标准做法是用 JSON 编码每个分片（<code>data:{"t":"..."}</code>），让转义成对出现。</p>
+</div>
 <p>缺的一块是取消：整个前端没有使用 <code>AbortController</code>，用户不能中途停止生成，切走页面后请求也仍在后台读完。结合后端没有处理“取消”信号的问题（见 <a href="modules.html#rag">业务模块 · RAG</a>），停止生成需要前后端一起补。</p>
 
 <h2 id="routing">路由与幂等创建</h2>
@@ -60,6 +104,18 @@
   <li>创建请求带上这个请求 ID。等待期间用户刷新，URL 不变，请求 ID 不变，后端据此返回同一个会话。</li>
   <li>创建成功后再 <code>replace</code> 到 <code>/interview/session/{sessionId}</code>。从此刷新走“恢复会话”：拉取会话，定位到当前题，恢复已填写的答案。两次 replace 保证浏览器历史里不会残留“创建”那一步，后退也不会重新触发创建。</li>
 </ol>
+<div class="callout example">
+  <span class="label">走一遍：地址栏在一次创建中的变化</span>
+  <pre>点击“开始面试”   navigate('/interview', { state: {skillId, difficulty, questionCount, ...} })
+InterviewWrapper  URL 里没有 requestId → &lt;Navigate to={ROUTES.interviewCreate(crypto.randomUUID())} replace /&gt;
+                  地址栏：/interview/create/9b2f7c1e-5d4a-4e8b-a3c2-7f1d0e6b8a90   （state 原样带过去）
+InterviewPage     startedRef.current 为 false → 置为 true → POST /api/interview/sessions {requestId: "9b2f7c1e-…", ...}
+                  （StrictMode 第二次执行 effect 时 startedRef 已是 true，直接返回）
+创建成功          navigate(ROUTES.interviewSession("c0ffee12ab34cd56"), { replace: true })
+                  地址栏：/interview/session/c0ffee12ab34cd56
+浏览器历史        [..., /interview/session/c0ffee12ab34cd56]   ← 两次都是 replace，没有中间页
+按后退            回到进入面试之前的页面，不会重新进入 /interview/create/…</pre>
+</div>
 <p>其他路由大多是字面量写在组件里，只有面试相关的几条放进了路由常量文件，这条项目规则只执行了一部分。</p>
 
 <h2 id="polling">轮询约定</h2>
@@ -86,9 +142,10 @@
   <li>另有一个分析节点每 100 毫秒计算一次平均音量，驱动界面上的音量动画。</li>
 </ol>
 <p>相比已废弃的 <code>ScriptProcessorNode</code>，AudioWorklet 不占主线程，页面渲染再忙也不会丢音频帧。</p>
+<p>把数字算一下：Web Audio 的 <code>process()</code> 每次只处理 128 个采样（一个 render quantum）。AudioContext 是按 16kHz 创建的，所以在 Chrome 里 <code>resample()</code> 发现源采样率等于目标采样率，直接返回原数组，重采样代码实际不执行；每次调用拿到 128 个采样，攒 25 次（3200 个）发一帧，也就是每秒 5 帧。每帧 3200 × 2 字节 = 6400 字节，Base64 后 8536 个字符，加上 JSON 外壳，上行带宽大约每秒 43KB。重采样那段代码只在浏览器不接受 16kHz 的 AudioContext 时才起作用，而且它对每个 128 采样的块单独做线性插值、用 <code>Math.round</code> 取输出长度：48kHz 时每块输出 43 个采样，一秒 375 块就是 16125 个，比标称的 16000 多了 0.8%。</p>
 <h3 id="audio-playback">播放</h3>
 <ul>
-  <li><strong>分块模式</strong>（默认）：收到 <code>audio_chunk</code> 后跳过 44 字节 WAV 头，把 16 位整数转成浮点，写进一个 24kHz 的 AudioBuffer 推入队列；上一段的 <code>onended</code> 触发下一段，实现无缝拼接。收到最后一块或 <code>audio_complete</code> 后，每 100 毫秒检查一次队列是否播完（最多等 30 秒），播完才把 AI 这轮的文字定稿为消息气泡，并解除录音锁定。</li>
+  <li><strong>分块模式</strong>（默认）：收到 <code>audio_chunk</code> 后跳过 44 字节 WAV 头，把 16 位整数转成浮点，写进一个 24kHz 的 AudioBuffer 推入队列；上一段的 <code>onended</code> 触发下一段。严格说这不是“无缝”：<code>onended</code> 是一个普通的主线程事件，要等事件循环轮到它才会 <code>start(0)</code> 下一段，主线程正忙着渲染时两句之间会多出几毫秒到几十毫秒的空隙。真正的无缝拼接是记下 <code>nextStartTime += buffer.duration</code>，收到新块时直接 <code>source.start(nextStartTime)</code> 预约在音频时钟上。收到最后一块或 <code>audio_complete</code> 后，每 100 毫秒检查一次队列是否播完（最多等 30 秒），播完才把 AI 这轮的文字定稿为消息气泡，并解除录音锁定。</li>
   <li><strong>整段模式</strong>：收到完整 WAV 交给 <code>&lt;audio&gt;</code> 元素播放，同时从 WAV 头里读出字节率和数据长度估算时长，设置一个“时长 + 1.5 秒，限制在 4–60 秒之间”的看门狗，防止 <code>ended</code> 事件丢失导致界面一直显示“面试官正在回答”。</li>
   <li><strong>自动播放限制</strong>：浏览器拒绝播放时提示“请点击页面任意位置以启用音频播放”，并直接结束本轮播放状态。</li>
 </ul>

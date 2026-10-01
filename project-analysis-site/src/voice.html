@@ -77,15 +77,121 @@
   <li><strong>想</strong>：用户看着字幕，可以直接修改识别结果，然后点“提交回答”。后端用 CAS 把会话标记为处理中，把阻塞的模型与合成管线丢到虚拟线程上执行，调度线程立即释放。模型以流式输出，文本按“距上次推送至少 80 毫秒且新增至少 4 个字”的节奏推给前端，避免刷屏。</li>
   <li><strong>说</strong>：每检测到句末标点就把这一句提交给语音合成，最多 3 句并发；合成结果由一个“有序发射器”按句子序号依次下发，前端用 AudioContext 队列无缝拼接播放。第一句话往往在模型还没说完时就已经开始播放，这是降低“首响时延”的关键。</li>
 </ol>
+<p>把这三段落到线上跑的 WebSocket 帧上，一轮对话大致是下面这个样子（字段名取自 <code>VoiceInterviewWebSocketHandler</code> 的各个 <code>sendXxx</code> 方法和前端 <code>api/voiceInterview.ts</code>，Base64 音频省略）：</p>
+<div class="callout example">
+  <span class="label">走一遍：一轮对话里双方收发的消息</span>
+  <pre>↓ {"type":"control","action":"welcome","message":"连接成功，准备开始语音面试"}
+↓ {"type":"control","action":"asr_ready","message":"语音识别已就绪"}        ← 收到它之前前端不录音
+↓ {"type":"text","content":"你好，我是本场面试官。第一个问题：……","final":true}   ← 开场白先落库再推
+↓ {"type":"audio","data":"UklGR…","text":"你好，我是本场面试官……"}          ← 开场白整段音频
+
+↑ {"type":"audio","data":"AAABAP…","timestamp":1760000000123}
+                                              ← 每 200ms 一帧：3200 个 16 位采样 = 6400 字节，Base64 后 8536 个字符
+↑ {"type":"audio","data":"…"} × N
+↓ {"type":"subtitle","text":"我负责的是订单系统","isFinal":false}           ← 实时字幕（缓冲区 + 暂定文本）
+↓ {"type":"subtitle","text":"我负责的是订单系统，主要做库存预扣","isFinal":false}
+
+↑ {"type":"control","action":"submit","data":{"text":"我负责的是订单系统，主要做库存预扣和超时取消"},"timestamp":…}
+                                              ← 用户可能改过字幕，以这里的 text 为准
+↓ {"type":"text","content":"好的。那库存预扣","final":false}                ← 模型流式文本，≥80ms 且 ≥4 字才推一次
+↓ {"type":"text","content":"好的。那库存预扣失败时怎么回滚？","final":false}
+↓ {"type":"subtitle","text":"我负责的是订单系统，……","isFinal":true}          ← 用户这一轮定稿
+↓ {"type":"text","content":"好的。那库存预扣失败时怎么回滚？","final":true}  ← 面试官这一轮定稿（已截断到 120 字内）
+↓ {"type":"audio_chunk","data":"UklGR…","index":0,"isLast":false}          ← 第 1 句的 WAV（44 字节头 + PCM）
+↓ {"type":"audio_chunk","data":"UklGR…","index":1,"isLast":false}
+↓ {"type":"control","action":"audio_complete","message":"面试官语音播放完成"}   ← 实际含义是“已全部发出”</pre>
+</div>
 
 <h2 id="decisions">几个关键的设计决策</h2>
 <ul>
   <li><strong>为什么由后端代理识别和合成</strong>：浏览器也可以直连 DashScope，但那样 API Key 会暴露在前端；由后端中转，还能把“识别结果 → 模型 → 合成”串成一条可控的管线，统一做回声防护、落库和指标埋点。</li>
   <li><strong>为什么改成手动提交</strong>：早期版本靠 VAD 检测到用户停顿就自动提交给模型，结果有两个问题：扬声器的声音被麦克风拾取，被当成用户说话；用户思考时停顿两三秒，一个回答被切成两次提交。提交 <span class="sha">241b583</span> 改成“识别只负责生成可编辑文本，用户点按钮才提交”，同时删掉了自动提交的防抖逻辑。这是一次典型的“用产品交互化解技术难题”。</li>
   <li><strong>为什么句子级并发合成</strong>：整段回复生成完再合成，用户要等“模型全部输出 + 整段合成”两段时间；按句合成后，首句的合成和后续内容的生成并行，首响时延只取决于第一句（<span class="sha">04ba710</span>）。</li>
-  <li><strong>为什么要有序发射器</strong>：并发合成时第二句可能比第一句先合成完，直接下发会乱序。发射器给每句一个序号，用一个等待线程按序号取结果，某一句超时或失败就跳过，不会卡住后面的句子。</li>
+  <li><strong>为什么要有序发射器</strong>：并发合成时第二句可能比第一句先合成完，直接下发会乱序。发射器给每句一个序号，用一个等待线程按序号取结果，某一句超时或失败就跳过，不会卡住后面的句子。具体实现见下文 <a href="#ordered-emitter">有序发射器的代码</a>。</li>
   <li><strong>为什么用虚拟线程</strong>：DashScope SDK 的调用都是阻塞的（建连、等待结果），一轮对话要占用好几个线程等待网络。处理器只保留 2 个平台线程做定时调度，阻塞工作全部放进“每任务一个虚拟线程”的执行器，线程几乎不花钱。</li>
 </ul>
+
+<h2 id="pipeline-code">一轮管线在代码里怎么走</h2>
+<h3 id="submit-cas">提交：一个 CAS 标志位</h3>
+<p>“用 CAS 把会话标记为处理中”指的是 <code>SessionState</code> 里的一个 <code>AtomicBoolean isProcessing</code>。<code>compareAndSet(false, true)</code> 是一条原子指令：只有当前值是 <code>false</code> 时才改成 <code>true</code> 并返回成功，两个线程同时调用只有一个能成功。它保证同一个会话同一时刻只有一条模型管线在跑：</p>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · VoiceInterviewWebSocketHandler.flushMergedUtteranceToLlm</span></div>
+  <pre>if (!state.isProcessing().compareAndSet(false, true)) {
+    // 上一轮还没跑完：不是拒绝，而是 400ms 后再试一次
+    utteranceMergeScheduler.schedule(() -&gt; flushMergedUtteranceToLlm(sessionId), 400, TimeUnit.MILLISECONDS);
+    return;
+}
+String userText = state.takeMergeBufferAndClear();          // 取走缓冲区并清空
+if (userText == null || userText.trim().isEmpty()) {
+    state.isProcessing().set(false);
+    return;
+}
+state.setAccumulatedText(userText);
+voicePipelineExecutor.execute(() -&gt; {                      // 虚拟线程，调度线程立刻返回
+    try {
+        triggerLlmResponse(sessionId, session, state);        // 模型 + 合成，阻塞几秒到十几秒
+    } finally {
+        state.isProcessing().set(false);
+    }
+});</pre>
+</div>
+<p>用户手快连点两次“提交”时：第一次 CAS 成功并取走缓冲区；第二次 CAS 失败，每 400 毫秒重试一次，等第一轮结束拿到锁后发现缓冲区已经空了，直接放掉标志位返回，不会重复调用模型。</p>
+<h3 id="sentence-split">按句切分：以标点为界</h3>
+<p>模型的流式输出是一小段一小段的 token。<code>DashscopeLlmService.chatStreamSentences</code> 在每个 token 到达时做两件事：检查这个 token 里有没有句末标点（<code>。！？；!?;.</code> 八个字符之一），有就把“上次切分位置到当前文本末尾”作为一句交给合成；另外按“距上次推送至少 80 毫秒、新增至少 4 个字符”的节奏把全文推给前端当字幕。用源码里的切分逻辑跑两段模拟的 token 流：</p>
+<div class="callout example">
+  <span class="label">走一遍：token 流怎么被切成句子</span>
+  <pre>token 流 1： "好的" "。" "那你说说" " Redis" " 为什么" "快" "？它" "的单线程" "模型有什么" "局限？"
+  第 0 句 = [好的。]
+  第 1 句 = [那你说说 Redis 为什么快？它]         ← “？它”在同一个 token 里，下一句的首字被带了过来
+  第 2 句 = [的单线程模型有什么局限？]
+
+token 流 2： "你" "提到" "用了 Spring" " Boot 3" "." "2" "，它的" "自动配置" "是怎么" "生效的？"
+  第 0 句 = [你提到用了 Spring Boot 3.]            ← 英文句点也算句末，版本号被拦腰切断
+  第 1 句 = [2，它的自动配置是怎么生效的？]</pre>
+</div>
+<p>两处切分都是按源码规则实际跑出来的。第一种情况文字上不影响阅读，但两句分别合成，“它”会被念在上一句的句尾、中间有一个停顿；第二种情况合成出来的是“……Spring Boot 三。”停顿后再念“二，它的自动配置……”。技术面试的回复里版本号、小数、域名很常见，把 <code>.</code> 当句末需要至少判断“后面紧跟数字或字母就不算”。</p>
+<h3 id="ordered-emitter">有序发射器</h3>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · VoiceInterviewWebSocketHandler.OrderedTtsChunkEmitter</span></div>
+  <pre>void submit(String sentence) {                          // 在模型流式回调的线程里被调用
+    int index = nextIndex.getAndIncrement();            // 0, 1, 2, ...
+    ttsSemaphore.acquireUninterruptibly();              // 并发上限 3：第 4 句会在这里等
+    CompletableFuture&lt;byte[]&gt; future = CompletableFuture.supplyAsync(() -&gt; {
+        try { return ttsService.synthesize(sentence); }
+        finally { ttsSemaphore.release(); }
+    }, voicePipelineExecutor);
+    futures.put(index, future);
+    synchronized (lock) { lock.notifyAll(); }
+}
+
+private int drainChunks() {                             // 单独一个虚拟线程，从构造时就开始跑
+    int index = 0;
+    while (true) {
+        CompletableFuture&lt;byte[]&gt; future = waitForFuture(index);   // 等第 index 句“被提交”
+        if (future == null) { ...; return emitted; }                // finish() 之后没有更多句子
+        try {
+            byte[] pcm = future.get(ttsTimeoutSec, TimeUnit.SECONDS);  // 等它“合成完”，最多 8 秒
+            sendAudioChunk(session, convertPcmToWav(pcm), index, false);
+        } catch (Exception e) {
+            future.cancel(true);                        // 超时或失败：跳过这一句
+        } finally {
+            index++;                                    // 永远按 0,1,2… 的顺序往下走
+        }
+    }
+}</pre>
+</div>
+<div class="callout example">
+  <span class="label">走一遍：三句话并发合成，完成顺序是 2、0、1</span>
+  <pre>t=0ms     第 0 句提交，开始合成（耗时 900ms）
+t=300ms   第 1 句提交，开始合成（耗时 1500ms）
+t=500ms   第 2 句提交，开始合成（耗时 400ms）
+t=900ms   第 2 句先合成完，但 drain 线程在 future(0).get() 上等着，不发
+t=900ms   第 0 句合成完 → 发 index=0 → 前端开始播放
+t=1800ms  第 1 句合成完 → 发 index=1
+t=1800ms  第 2 句早已完成，get() 立即返回 → 发 index=2 → 发 audio_complete
+如果第 1 句卡住：t=900ms 起最多等 8 秒 → 取消它 → 直接发 index=2，这一轮少一句话，但不会卡死</pre>
+</div>
+<p>代码里还有一个容易忽略的点：信号量是在 <code>submit</code> 里、也就是模型流式回调的线程上获取的。如果前三句都还在合成，第四句到来时这个线程会阻塞，模型后续的 token 也就暂时读不出来、字幕停住，直到有一句合成完释放许可。这是一种隐式的背压：合成跟不上时，文字推送也跟着放慢。</p>
 
 <h2 id="asr">语音识别：连接、合并与重连</h2>
 <h3 id="asr-connect">建连与就绪信号</h3>
@@ -93,8 +199,52 @@
 <p>如果 10 秒后还没就绪，后端给前端发“正在自动重连”，停掉旧连接重建，最多重试 2 次，仍失败就提示检查语音服务配置。</p>
 <h3 id="asr-merge">实时字幕与多段合并</h3>
 <p>识别服务会推两类事件：进行中的部分结果（由“已确定的 text + 暂定的 stash”拼出当前整句）和切段后的最终结果。后端维护一个合并缓冲区：每来一个最终段就拼进缓冲区，部分结果则“缓冲区 + 当前部分”一起作为字幕推给前端，所以用户看到的始终是整段回答而不只是最后一句。拼接时处理了识别服务常见的重叠现象：新段与旧段完全相同、新段以旧段开头、旧段以新段结尾时，都只保留一份；否则上一段以句末标点结尾就用空格连接，否则补一个逗号。</p>
+<div class="callout example">
+  <span class="label">走一遍：SessionState.joinSegments 对几种切段的处理</span>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>已有缓冲区</th><th>新到的最终段</th><th>合并结果</th><th>命中的规则</th></tr></thead>
+      <tbody>
+        <tr><td>我负责订单系统</td><td>我负责订单系统，主要做库存</td><td>我负责订单系统，主要做库存</td><td>新段以旧段开头：用新段</td></tr>
+        <tr><td>主要做库存预扣</td><td>库存预扣</td><td>主要做库存预扣</td><td>旧段以新段结尾：保持旧段</td></tr>
+        <tr><td>我负责订单系统。</td><td>主要做库存预扣</td><td>我负责订单系统。 主要做库存预扣</td><td>旧段以句末标点结尾：加空格</td></tr>
+        <tr><td>我负责订单系统</td><td>主要做库存预扣</td><td>我负责订单系统，主要做库存预扣</td><td>其他情况：补中文逗号</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small">实时字幕用同一个函数把“缓冲区”和“当前暂定文本”（识别服务推来的 text + stash）拼起来。用户点提交时，前端把输入框里（可能被用户改过）的文字放进 submit 消息，后端用 <code>setMergeBufferDirectly</code> 覆盖缓冲区，再走上面的 CAS 流程。</p>
+</div>
 <h3 id="asr-recover">断线恢复与“第三轮起无声”</h3>
 <p>DashScope 的识别连接会被服务端关闭（空闲、网络抖动）。后端在发送音频失败时自动重建连接，再用 80 毫秒间隔最多重发 15 次这帧音频。这里有一个很隐蔽的 bug：旧连接的 <code>onClose</code> 回调可能在新连接建好之后才触发，它会把会话表里的新连接一起删掉，表现为“前两轮正常，第三轮起没有识别结果”。修复方式是在 <code>onClose</code> 里比较对象身份：只有会话表里存的仍是自己这条连接时才删除。同一会话的启动和停止还用一把按会话 ID 分配的锁串行化，避免并发的“停 + 启”交错。</p>
+<div class="split">
+  <div>
+    <h4>出问题时的时序</h4>
+    <ol class="small">
+      <li>第 2 轮结束后连接 A 空闲，被 DashScope 断开，但 <code>onClose(A)</code> 回调还没执行。</li>
+      <li>第 3 轮用户开口，发送音频失败，触发重连：建立连接 B，<code>sessions.put("42", B)</code>。</li>
+      <li><code>onClose(A)</code> 这时才执行。如果它按 key 删除（<code>sessions.remove("42")</code>），删掉的就是刚建好的 B。</li>
+      <li>之后每一帧音频都找不到识别连接，字幕和识别结果全部消失。</li>
+    </ol>
+    <p class="small muted">仓库历史里看不到按 key 删除的旧版本：身份判断在这个文件进入仓库时（<span class="sha">ac7295b</span>）就已存在，根因记录在代码注释“避免重连后旧 onClose 误删新连接（典型「第三轮起无声」根因）”里。</p>
+  </div>
+  <div>
+    <div class="prompt code">
+      <div class="prompt-head"><span>修复后 · QwenAsrService 的 onClose</span></div>
+      <pre>public void onClose(int code, String reason) {
+    OmniRealtimeConversation closed = conversationRef.get();
+    sessions.compute(sessionId, (id, existing) -&gt; {
+        // 只有表里存的还是“我这条连接”才删除
+        if (existing != null &amp;&amp; closed != null
+                &amp;&amp; existing.getConversation() == closed) {
+            return null;
+        }
+        return existing;                 // 已被新连接替换：保留
+    });
+}</pre>
+    </div>
+  </div>
+</div>
+<p><code>ConcurrentHashMap.compute</code> 保证“读出当前值、比较、决定是否删除”这三步对同一个 key 是原子的；比较用的是 <code>==</code>（对象身份）而不是 <code>equals</code>，因为两条连接对应同一个会话 ID，业务上“相等”，只有对象身份能区分“是不是我”。</p>
 <div class="callout pitch">
   <span class="label">面试这样说</span>
   <p>我们遇到过一个“第三轮起没声音”的问题。根因是重连时旧连接的关闭回调异步触发，按会话 ID 把刚建好的新连接从表里删了。修复是让关闭回调只删除“自己那条”连接，用对象身份而不是 ID 判断。这类问题的共性是：异步回调里只按 key 操作共享状态，没有确认状态是否已被别人替换，和乐观锁要解决的是同一类问题。</p>
@@ -104,7 +254,33 @@
 <ul>
   <li><strong>每句一条连接</strong>：每次合成都新建一条到 DashScope 的实时合成连接，发送音色、格式（PCM 24kHz 单声道）、语速等配置，追加文本后提交，等服务端的 <code>response.done</code>，最后关闭连接。</li>
   <li><strong>建连超时</strong>：SDK 的 connect 在握手失败时可能永远不返回，导致那一轮彻底卡死。提交 <span class="sha">b1b8133</span> 先写测试复现“握手失败后阻塞”，<span class="sha">226440b</span> 把 connect 放进虚拟线程、用倒计时锁存器等最多 5 秒，并重写 SDK 客户端的失败回调，握手失败时立即释放等待。</li>
-  <li><strong>三层超时</strong>：建连 5 秒、单句结果 8 秒（发射器等每一句的上限）、单次合成 30 秒（SDK 等待上限）。第二层来自 <span class="sha">1e2a34f</span>：当时 TTS 连接间歇性挂死，导致“第二题没有声音”。</li>
+  <li><strong>三层超时</strong>：建连 5 秒、单句结果 8 秒（发射器等每一句的上限）、单次合成 30 秒（SDK 等待上限）。第二层来自 <span class="sha">1e2a34f</span>：当时 TTS 连接间歇性挂死，导致“第二题没有声音”。建连超时的实现是一个“虚拟线程 + 倒计时锁存器”的组合：
+    <div class="prompt code">
+      <div class="prompt-head"><span>源码节选 · QwenTtsService.connectWithTimeout 与 createClient</span></div>
+      <pre>Thread connectThread = Thread.ofVirtual().name("qwen-tts-connect").start(() -&gt; {
+    try {
+        qwenTtsRealtime.connect();                 // SDK 的阻塞调用，握手失败时可能永远不返回
+    } catch (Throwable t) {
+        connectionFailureRef.compareAndSet(null, t);
+    } finally {
+        connectionFinishedLatch.countDown();
+    }
+});
+if (!connectionFinishedLatch.await(connectTimeoutSeconds, TimeUnit.SECONDS)) {   // 默认 5 秒
+    throw new TimeoutException("TTS WebSocket connection timed out after 5 seconds");
+}
+
+// 另一半：继承 SDK 客户端，重写 OkHttp 的 onFailure，握手失败时立刻释放锁存器
+return new QwenTtsRealtime(param, callback) {
+    @Override
+    public void onFailure(WebSocket webSocket, Throwable throwable, Response response) {
+        connectionFailureRef.compareAndSet(null,
+            new IllegalStateException("TTS WebSocket handshake failed: HTTP " + response.code() + ...));
+        connectionFinishedLatch.countDown();       // 不等 5 秒，失败立即返回
+    }
+};</pre>
+    </div>
+    两部分配合：握手明确失败时（比如 Key 错误返回 401）立刻结束；什么回调都不来时最多等 5 秒。之前卡死的原因正是 SDK 在握手失败后既不抛异常也不返回，调用线程永远阻塞在 <code>connect()</code> 上。</li>
   <li><strong>兜底</strong>：某一句失败就跳过，全部失败（一块音频都没发出去）时，再用整段文本合成一次。所有合成失败都返回空数组而不是抛异常，由调用方决定是否兜底。</li>
   <li><strong>格式</strong>：合成返回裸 PCM，后端手写 44 字节 WAV 头后下发；前端分块模式下直接跳过这 44 字节，把 16 位整数转成浮点写入 AudioBuffer 排队播放。另有一个“合并模式”（收齐所有句子后拼成一个 WAV），由配置切换。</li>
   <li><strong>开场白缓存</strong>：开场问题的音频按文本缓存在内存里；启动预热默认关闭（<span class="sha">8fc9be3</span>），因为预热会在应用启动时就产生十几次云端合成调用，测试和本地开发都不希望这样。</li>
@@ -123,6 +299,25 @@
     </tbody>
   </table>
 </div>
+<p>第三、四层在后端就是两个标志位的判断。<code>aiSpeaking</code> 在 <code>triggerLlmResponse</code> 开头置为 <code>true</code>，在 <code>finally</code> 里置为 <code>false</code> 并记下“冷却截止时间 = 现在 + 800 毫秒”：</p>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · VoiceInterviewWebSocketHandler</span></div>
+  <pre>boolean isAiSpeakingOrCooldown() {                    // SessionState
+    if (aiSpeaking.get()) return true;
+    return System.currentTimeMillis() &lt; aiSpeakEndAt.get();   // 冷却期内也算
+}
+
+private void handleUserAudio(String sessionId, String base64Audio) {      // 第 3 层：上行音频
+    if (state != null &amp;&amp; state.isAiSpeakingOrCooldown()) return;         // 直接丢弃，不送识别
+    ...
+}
+
+private void handleSttResult(String sessionId, String text, boolean isFinal) {  // 第 4 层：识别结果
+    if (state.isProcessing().get() || state.isAiSpeakingOrCooldown()) return;  // 迟到的字幕丢弃
+    ...
+}</pre>
+</div>
+<p>注意 <code>aiSpeaking</code> 变回 <code>false</code> 的时机是“所有音频块都已经发出去”（<code>awaitCompletion</code> 返回），而不是“浏览器播完”。一段 4 句话的回复在服务端几百毫秒内就发完了，浏览器可能还要播放十秒；这段时间里保护上行音频的只有前端第 2 层（本地播放队列没播完就不发送）。所以说两端的窗口是“互相补位”的，缺了前端那一层，冷却期的 800 毫秒远远不够。</p>
 <p>第四层是 2026 年 8 月最后一个功能修复，配了后端单测和一个 Playwright 回归用例：往页面里注入一个假的 WebSocket，在“提交之后”推送一条上一轮的旧字幕，断言输入区不被覆盖，而下一轮的新字幕能正常显示。</p>
 
 <h2 id="persistence">消息怎么存</h2>
@@ -146,6 +341,19 @@
   <li><strong>WINDOW</strong>：只保留最近 20 轮原文，更早的丢弃。</li>
   <li><strong>SUMMARY</strong>：最近 20 轮原文 + 更早轮次的滚动摘要。未被摘要覆盖的早期轮次攒够 10 轮才触发一次增量摘要，把新轮次合并进旧摘要，而不是每轮都调模型；摘要失败就沿用旧摘要，不影响本轮回答。摘要用不带工具的客户端生成，并在会话行的悲观锁内写入，防止并发重复。</li>
 </ul>
+<div class="callout example">
+  <span class="label">走一遍：SUMMARY 模式下，窗口 20、批次 10</span>
+  <pre>（一轮 = 消息表里的一行 = 面试官一句 + 候选人的回答）
+第 1–20 轮    总数 ≤ 20，不压缩，全量原文
+第 21–29 轮   早期轮次 1–9 条，未满 10 条，不摘要；发给模型的仍是全量原文
+第 30 轮      早期 10 条（第 1–10 轮）未覆盖 → 调一次模型摘要
+              写入 SUMMARY 行：ai_generated_text = 摘要，sequence_num = -(10 + 1) = -11
+              发给模型：摘要 + 第 11–30 轮原文（20 轮）
+第 31–39 轮   早期 11–19 条，其中未覆盖的 1–9 条，不摘要
+              发给模型：摘要 + 第 11 轮起的原文（21–29 轮，窗口会暂时超过 20）
+第 40 轮      未覆盖的第 11–20 轮满 10 条 → 把它们合并进旧摘要，sequence_num 更新为 -21
+恢复会话时读到 sequence_num = -21，就知道摘要已覆盖前 20 轮，不需要额外的列</pre>
+</div>
 <p>这个功能默认关闭，保证开启前后行为完全一致。它的 Prompt 模板里占位符写成了尖括号，和 Spring AI 默认的花括号分隔符不一致，开启后摘要模型拿不到真实对话，详见 <a href="ai-foundation.html#prompts">AI 底座 · Prompt 模板</a>。这一点已用真实模板渲染验证：变量值一个都没进入 Prompt，而模型返回的非空“摘要”会被持久化并取代早期原文（<a href="agent-lab.html#e3">实验 E3</a>）。</p>
 
 <h2 id="metrics">可观测性</h2>

@@ -94,7 +94,7 @@
   <li><strong>工具回合丢消息</strong>：默认配方关了 ToolCallingAdvisor 的内部历史又没有记忆 Advisor，第二轮只发 SYSTEM → TOOL；这很可能就是 4 月“工具调用不兼容”的根因（E1，A01）。</li>
   <li><strong>渐进式披露在这里是负收益</strong>：工具定义约 895 token，比任何一个技能正文都大，还要多一次往返（E2）。</li>
   <li><strong>摘要模板空转</strong>：占位符写成尖括号，变量不替换，开启压缩反而丢记忆（E3，A04）。</li>
-  <li><strong>重试被放大</strong>：结构化调用最坏请求模型 8 次，指标只显示 2 次（E4，A03）。</li>
+  <li><strong>重试被放大</strong>：结构化调用最坏请求模型 8 次，指标只显示 2 次（E4，A03）；遇到 429 / 5xx / 超时时 OpenAI SDK 还会对每个请求再试 2 次。</li>
   <li><strong>护栏误伤</strong>：SafeGuard 扫描整个 Prompt，引用注入话术的正确回答会让整批评估得 0 分（E5，A02）。</li>
   <li><strong>循环没有上限</strong>：框架只看有没有 tool_calls，要自己加循环内侧的硬上限和工具预算（E6）。</li>
   <li><strong>记忆开关一开就坏</strong>：2.0 的记忆 Advisor 断言必须有会话 ID，项目从不传（A09）。</li>

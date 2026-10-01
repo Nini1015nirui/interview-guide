@@ -159,6 +159,48 @@
 </div>
 <h3 id="exception-handler">全局异常处理</h3>
 <p><code>GlobalExceptionHandler</code> 按异常类型分别处理：业务异常原样返回码和消息；参数校验异常拼接字段错误；上传超限单独提示；AI 调用的网络异常用 Java 21+ 的 switch 模式匹配按 cause 细分（<code>SocketTimeoutException</code> 映射为“超时”，消息里含 handshake 映射为“网络不稳定”），HTTP 客户端异常再按消息里的 401、429 映射到“密钥无效”“频率超限”；兜底的 <code>Exception</code> 只返回“系统繁忙”，详细堆栈留在日志里。这套写法是在 Java 25 升级时（<span class="sha">4b96015</span>）改成模式匹配的。</p>
+<div class="prompt code">
+  <div class="prompt-head"><span>源码节选 · common/exception/GlobalExceptionHandler.java</span></div>
+  <pre>@ExceptionHandler(ResourceAccessException.class)          // org.springframework.web.client
+@ResponseStatus(HttpStatus.OK)
+public Result&lt;Void&gt; handleResourceAccessException(ResourceAccessException e) {
+    return switch (e.getCause()) {
+        case SocketTimeoutException _ -&gt; Result.error(ErrorCode.AI_SERVICE_TIMEOUT, "AI服务响应超时，请稍后重试");
+        case null, default -&gt; { ... "handshake" → 网络不稳定；否则 → 暂时不可用 }
+    };
+}
+
+@ExceptionHandler(RestClientException.class)
+@ResponseStatus(HttpStatus.OK)
+public Result&lt;Void&gt; handleRestClientException(RestClientException e) {
+    return switch (e.getMessage()) {
+        case null -&gt; Result.error(ErrorCode.AI_SERVICE_ERROR, "AI服务调用失败，请稍后重试");
+        case String m when m.contains("401") || m.contains("Unauthorized") -&gt;
+            Result.error(ErrorCode.AI_API_KEY_INVALID, "AI服务密钥无效，请联系管理员");
+        case String m when m.contains("429") || m.contains("Too Many Requests") -&gt;
+            Result.error(ErrorCode.AI_RATE_LIMIT_EXCEEDED, "AI服务调用过于频繁，请稍后重试");
+        default -&gt; Result.error(ErrorCode.AI_SERVICE_ERROR, "AI服务调用失败，请稍后重试");
+    };
+}</pre>
+</div>
+<div class="callout risk">
+  <span class="label">这两个分支在 Spring AI 2.0 下接不到模型调用的异常</span>
+  <p>它们捕获的是 Spring 的 <code>RestClientException</code> 家族，这是 Spring AI 1.x 底层用 <code>RestClient</code> 调模型时会抛的异常。项目现在的模型实例由 <code>ApiPathResolver</code> 用 OpenAI 官方 Java SDK（<code>com.openai.client.OpenAIClient</code>）构建。按项目完全相同的构建方式，指向一个本地假服务实测，异常类型是：</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>假服务的行为</th><th>实际抛出的异常</th><th>是 <code>RestClientException</code> 吗</th><th class="num">假服务收到的请求数</th></tr></thead>
+      <tbody>
+        <tr><td>返回 401</td><td><code>com.openai.errors.UnauthorizedException</code></td><td>否</td><td class="num">1</td></tr>
+        <tr><td>返回 429</td><td><code>com.openai.errors.RateLimitException</code></td><td>否</td><td class="num">3</td></tr>
+        <tr><td>返回 503</td><td><code>com.openai.errors.InternalServerException</code></td><td>否</td><td class="num">3</td></tr>
+        <tr><td>读超时</td><td><code>com.openai.errors.OpenAIIoException</code> ← <code>SocketTimeoutException</code></td><td>否</td><td class="num">3</td></tr>
+        <tr><td>端口不通</td><td><code>com.openai.errors.OpenAIIoException</code> ← <code>ConnectException</code></td><td>否</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>所以错误码 7002（超时）、7004（密钥无效）、7005（频率超限）在整个代码库里只有这两个处理器会产生，而它们实际上接不到模型调用的异常。多数业务代码会先把异常包成 <code>BusinessException</code>（前端看到的是“简历分析失败：429: …”这类拼接原文的提示），没被包住的落进兜底分支，只显示“系统繁忙，请稍后重试”。修复是按 <code>com.openai.errors</code> 的类型重写这两个处理器。</p>
+  <p>第二列的请求数揭示了另一件事：OpenAI Java SDK 自带重试，对 429、5xx 和网络超时默认再试 2 次（请求头里的 <code>x-stainless-retry-count</code> 依次是 0、1、2，间隔约 0.5 秒、1 秒）。<code>spring.ai.retry.max-attempts: 1</code> 关掉的只是 Spring AI 自己的重试模板，管不到 SDK 这一层，而 <code>ApiPathResolver</code> 构建客户端时也没有设置 <code>maxRetries</code>。</p>
+</div>
 
 <h2 id="request-lifecycle">一次请求怎么走：以上传简历为例</h2>
 <p>这是项目里最典型的“同步阶段只做快且确定的事，慢调用丢给异步”的链路，面试讲架构时可以拿它串起大部分组件。</p>
@@ -174,6 +216,33 @@
   <li><strong>立即返回</strong>：接口返回 PENDING，前端跳到简历库，每 3 秒轮询一次列表。</li>
   <li><strong>异步分析</strong>：消费者线程拉到消息，检查简历是否已删除或已完成，改为 <code>PROCESSING</code>，调用大模型做结构化评分，写入 <code>resume_analyses</code>，最后改为 <code>COMPLETED</code> 并 ACK；失败则重新入队，最多 3 次。</li>
 </ol>
+<p>同一条链路按类和方法展开（同步部分都在 HTTP 请求线程上，<code>uploadAndAnalyze</code> 本身不带事务）：</p>
+<div class="prompt code">
+  <div class="prompt-head"><span>调用链 · POST /api/resumes/upload</span></div>
+  <pre>RateLimitAspect.around                           EVALSHA 限流脚本（global 5/s + ip 5/s）
+└ ResumeController.uploadAndAnalyze
+  └ ResumeUploadService.uploadAndAnalyze
+    ├ FileValidationService.validateFile          非空、≤ 10MB
+    ├ ResumeParseService.detectContentType        Tika 按魔数识别 MIME，再比对白名单
+    ├ ResumePersistenceService.findExistingResume FileHashService 算 SHA-256 → findByFileHash
+    │   └ 命中：accessCount + 1，直接返回历史分析（handleDuplicateResume）
+    ├ ResumeParseService.parseResume              Tika 抽正文 → TextCleaningService.cleanText
+    ├ FileStorageService.uploadResume             PutObject 到 resumes/yyyy/MM/dd/uuid8_拼音名
+    ├ ResumePersistenceService.saveResume         @Transactional：INSERT resumes，状态 PENDING，提交
+    └ AnalyzeStreamProducer.sendAnalyzeTask       XADD resume:analyze:stream（事务已提交）
+← Result.success({resume: {id, filename, analyzeStatus: "PENDING"},
+                  storage: {fileKey, fileUrl, resumeId}, duplicate: false})
+
+------- 之后在 analyze-consumer 线程上 -------
+AnalyzeStreamConsumer.processMessage
+├ shouldSkip          简历不存在或已 COMPLETED → ACK 丢弃
+├ markProcessing      UPDATE analyze_status = 'PROCESSING'
+├ processBusiness
+│ ├ ResumeGradingService.analyzeResume        StructuredOutputInvoker → 模型
+│ └ ResumePersistenceService.saveAnalysis     @Transactional：INSERT resume_analyses
+├ markCompleted       UPDATE analyze_status = 'COMPLETED'
+└ XACK</pre>
+</div>
 
 <h2 id="data-model">数据模型</h2>
 <p>共 16 张表，全部由 Flyway 的 <code>V1__init_schema.sql</code> 和 4 个增量脚本创建。按领域归类如下：</p>
@@ -250,7 +319,7 @@
 <h2 id="observability">可观测性</h2>
 <p>除了 Actuator 自带的 JVM、HTTP、连接池指标，项目自己埋了两组业务指标，都通过 Micrometer 注册，可以被 Prometheus 抓取：</p>
 <ul>
-  <li><strong>结构化输出</strong>：<code>app.ai.structured_output.invocations</code>、<code>attempts</code>、<code>latency</code>，标签是调用场景（如“简历分析”“批次评估”）和成功/失败。场景名先规范化成小写下划线并限制 48 个字符，避免标签基数失控。</li>
+  <li><strong>结构化输出</strong>：<code>app.ai.structured_output.invocations</code>、<code>attempts</code>、<code>latency</code>，标签是调用场景和成功/失败。场景名先规范化成小写下划线并限制 48 个字符，避免标签基数失控。但规范化会把所有非 <code>[a-z0-9_]</code> 字符换掉，而调用方传的场景名全是中文，实际只剩 <code>unknown</code> 和 <code>jd</code> 两个标签值，按场景拆分指标做不到，见 <a href="ai-foundation.html#so-why">AI 底座 · 结构化输出</a>。</li>
   <li><strong>语音面试</strong>：大模型首 token 延迟、大模型总耗时、TTS 耗时、ASR 合并等待时间、单轮总耗时、轮次成功/失败计数、TTS 空音频计数。这些是调优语音延迟的依据。</li>
 </ul>
 <p>缺少的部分：没有链路追踪，日志不是结构化格式，异步任务的积压量（Stream 长度、pending 数）没有暴露成指标。如果被问“怎么监控这个系统”，可以从这三点展开。</p>
