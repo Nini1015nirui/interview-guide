@@ -9,6 +9,7 @@ import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionEntity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -40,8 +41,8 @@ public class DashscopeLlmService {
             ChatClient chatClient = llmProviderRegistry.getVoiceChatClient(provider);
 
             ChatClient.CallResponseSpec response = chatClient.prompt()
-                .system(promptContext.systemPrompt())
                 .user(promptContext.userPrompt())
+                .advisors(promptContext.advisors())
                 .call();
 
             String content = response.chatResponse().getResult().getOutput().getText();
@@ -85,8 +86,8 @@ public class DashscopeLlmService {
             int minCharsDelta = Math.max(4, voiceInterviewProperties.getAiStreamMinCharsDelta());
 
             chatClient.prompt()
-                .system(promptContext.systemPrompt())
                 .user(promptContext.userPrompt())
+                .advisors(promptContext.advisors())
                 .stream()
                 .content()
                 .doOnNext(token -> {
@@ -163,7 +164,8 @@ public class DashscopeLlmService {
             }
         }
 
-        String systemPrompt = promptService.generateSystemPromptWithContext(session.getSkillId(), resumeText);
+        List<Advisor> advisors = promptService.buildPromptAdvisors(
+            session.getSkillId(), resumeText, session.getCustomJdText());
 
         StringBuilder promptBuilder = new StringBuilder();
         if (conversationHistory != null && !conversationHistory.isEmpty()) {
@@ -175,7 +177,7 @@ public class DashscopeLlmService {
         }
         promptBuilder.append("用户：").append(
             promptSanitizer.wrapWithDelimiters("input", promptSanitizer.sanitize(userInput)));
-        return new PromptContext(systemPrompt, promptBuilder.toString());
+        return new PromptContext(promptBuilder.toString(), advisors);
     }
 
     private String mapLlmErrorToUserMessage(Exception e) {
@@ -244,5 +246,5 @@ public class DashscopeLlmService {
         return false;
     }
 
-    private record PromptContext(String systemPrompt, String userPrompt) {}
+    private record PromptContext(String userPrompt, List<Advisor> advisors) {}
 }
